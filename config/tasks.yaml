@@ -1,0 +1,6 @@
+research_task:
+  description: >
+    {user_input}
+
+  expected_output: >
+    Helpful response to the user.
