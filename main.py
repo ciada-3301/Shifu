@@ -37,3 +37,12 @@ class MyCrew():
             tasks=[self.research_task()],
             verbose=True
         )
+
+
+inputs = {
+    "user_input": "Latest AI news"
+}
+
+result = MyCrew().crew().kickoff(inputs=inputs)
+
+print(result)
