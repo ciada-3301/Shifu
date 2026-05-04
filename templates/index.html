@@ -3,28 +3,37 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Shifu — AI Assistant</title>
+  <title>Shifu — AI Master</title>
 
-  <!-- Fonts -->
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet" />
+  <!-- Fonts: Cormorant Garamond (display), Outfit (body), JetBrains Mono (code) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-  <!-- Markdown + Pygments -->
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="static/style.css" />
 </head>
-<body>
+<body data-testid="shifu-app">
 
-  <!-- Ambient background orbs -->
+  <!-- ═══ Ambient backdrop ═══ -->
   <div class="bg-orbs" aria-hidden="true">
     <div class="orb orb-1"></div>
     <div class="orb orb-2"></div>
     <div class="orb orb-3"></div>
     <div class="orb orb-4"></div>
+  </div>
+
+  <!-- Constellation pinpoints -->
+  <div class="constellation" aria-hidden="true">
+    <span style="--x:8%;--y:14%;--d:2.4s"></span>
+    <span style="--x:22%;--y:62%;--d:3.1s"></span>
+    <span style="--x:38%;--y:28%;--d:2.7s"></span>
+    <span style="--x:54%;--y:78%;--d:3.6s"></span>
+    <span style="--x:67%;--y:18%;--d:2.9s"></span>
+    <span style="--x:81%;--y:48%;--d:3.3s"></span>
+    <span style="--x:91%;--y:82%;--d:2.6s"></span>
+    <span style="--x:14%;--y:88%;--d:3.4s"></span>
+    <span style="--x:46%;--y:8%;--d:2.5s"></span>
+    <span style="--x:73%;--y:65%;--d:3.0s"></span>
   </div>
 
   <!-- Grain overlay -->
@@ -33,36 +42,46 @@
   <div class="app-shell">
 
     <!-- ═══ SIDEBAR ═══ -->
-    <aside class="sidebar" id="sidebar">
+    <aside class="sidebar" id="sidebar" data-testid="sidebar">
+
       <div class="sidebar-header">
-        <div class="logo">
-          <span class="logo-icon">🥷</span>
-          <span class="logo-text">Shifu</span>
+        <div class="logo" data-testid="shifu-logo">
+          <span class="logo-mark" aria-hidden="true">師</span>
+          <span class="logo-wordmark">
+            <span class="logo-text">shifu</span>
+            <span class="logo-tag">— ai master</span>
+          </span>
         </div>
-        <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M3 12h18M3 6h18M3 18h18"/>
+        <button class="sidebar-toggle" id="sidebarToggle" title="Collapse sidebar" data-testid="sidebar-toggle-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="4" y1="6" x2="20" y2="6"></line>
+            <line x1="4" y1="12" x2="14" y2="12"></line>
+            <line x1="4" y1="18" x2="20" y2="18"></line>
           </svg>
         </button>
       </div>
 
-      <button class="new-chat-btn" id="newChatBtn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <path d="M12 5v14M5 12h14"/>
+      <button class="new-chat-btn" id="newChatBtn" data-testid="new-chat-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
         </svg>
-        New conversation
+        <span>New conversation</span>
+        <span class="kbd">⌘ N</span>
       </button>
 
-      <div class="convo-list" id="convoList">
-        <!-- Dynamically populated -->
-      </div>
+      <div class="sidebar-section-label">recent</div>
+
+      <nav class="convo-list" id="convoList" data-testid="convo-list">
+        <!-- conversations rendered by app.js -->
+      </nav>
 
       <div class="sidebar-footer">
         <div class="model-badge">
-          <span class="model-dot"></span>
-          <span class="model-name">gemma4:31b · ollama</span>
+          <span class="model-dot" aria-hidden="true"></span>
+          <span class="model-name">crewai · online</span>
         </div>
-        <div class="sidebar-hint">Powered by CrewAI</div>
+        <p class="sidebar-hint">A master answers only what is asked.</p>
       </div>
     </aside>
 
@@ -71,74 +90,120 @@
 
       <!-- Top bar -->
       <header class="chat-header">
-        <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Open menu">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M3 12h18M3 6h18M3 18h18"/>
+        <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Open menu" data-testid="mobile-menu-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
           </svg>
         </button>
-        <div class="chat-title" id="chatTitle">New conversation</div>
+
+        <div class="chat-title-wrap">
+          <span class="chat-title" id="chatTitle">Untitled session</span>
+          <span class="chat-subtitle">tempered by silence · sharpened by reason</span>
+        </div>
+
         <div class="header-actions">
-          <button class="icon-btn" id="clearBtn" title="Clear chat">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
+          <button class="icon-btn" id="exportBtn" title="Export conversation" data-testid="export-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+          </button>
+          <button class="icon-btn" id="settingsBtn" title="Settings" data-testid="settings-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
             </svg>
           </button>
         </div>
       </header>
 
       <!-- Messages -->
-      <div class="messages-container" id="messagesContainer">
+      <div class="messages-container" id="messagesContainer" data-testid="messages-container">
+
         <!-- Welcome screen -->
-        <div class="welcome-screen" id="welcomeScreen">
-          <div class="welcome-icon">🥷</div>
-          <h1 class="welcome-title">Shifu is ready</h1>
-          <p class="welcome-sub">Your personal AI assistant, powered by CrewAI agents.<br/>Ask anything — search the web, read files, browse directories.</p>
-          <div class="welcome-chips">
-            <button class="chip" data-prompt="Search the web for the latest AI news today">🔍 Latest AI news</button>
-            <button class="chip" data-prompt="List the files in my current directory">📁 Browse directory</button>
-            <button class="chip" data-prompt="Write a Python function to read a PDF and extract text">🐍 Python snippet</button>
-            <button class="chip" data-prompt="Explain the difference between RAG and fine-tuning">🧠 RAG vs fine-tuning</button>
+        <div class="welcome-screen" id="welcomeScreen" data-testid="welcome-screen">
+          <div class="welcome-mark" aria-hidden="true">
+            <span class="welcome-kanji">師</span>
+            <span class="welcome-ring"></span>
+          </div>
+          <h1 class="welcome-title">
+            <em>What</em> may the master answer?
+          </h1>
+          <p class="welcome-sub">A studied AI tempered by CrewAI agents — capable of searching the open web, reading your files, and walking your filesystem with the patience of an old hand.</p>
+
+          <div class="welcome-divider" aria-hidden="true">
+            <span class="dv-line"></span>
+            <span class="dv-diamond"></span>
+            <span class="dv-line"></span>
+          </div>
+
+          <div class="welcome-chips" data-testid="welcome-chips">
+            <button class="chip" data-prompt="Search the web for the latest AI news today" data-testid="chip-news">
+              <span class="chip-glyph">◇</span>
+              <span>Search the open web</span>
+            </button>
+            <button class="chip" data-prompt="List the files in my current directory" data-testid="chip-browse">
+              <span class="chip-glyph">◇</span>
+              <span>Walk this directory</span>
+            </button>
+            <button class="chip" data-prompt="Write a Python function to read a PDF and extract text" data-testid="chip-python">
+              <span class="chip-glyph">◇</span>
+              <span>Draft a Python script</span>
+            </button>
+            <button class="chip" data-prompt="Explain the difference between RAG and fine-tuning" data-testid="chip-rag">
+              <span class="chip-glyph">◇</span>
+              <span>Teach me RAG vs fine-tune</span>
+            </button>
           </div>
         </div>
       </div>
 
-      <!-- File preview bar (shows attached files above input) -->
-      <div class="file-preview-bar" id="filePreviewBar"></div>
+      <!-- File preview bar -->
+      <div class="file-preview-bar" id="filePreviewBar" data-testid="file-preview-bar"></div>
 
       <!-- Input area -->
       <div class="input-area">
-        <div class="input-glass">
+        <div class="input-glass" data-testid="input-glass">
 
-          <!-- Attachment button -->
-          <button class="attach-btn" id="attachBtn" title="Attach file (PDF, image, text)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+          <button class="attach-btn" id="attachBtn" title="Attach file (PDF, image, text)" data-testid="attach-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
             </svg>
           </button>
           <input type="file" id="fileInput" multiple accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt,.md,.csv" hidden />
 
-          <!-- Textarea -->
-          <textarea
-            id="messageInput"
-            placeholder="Ask Shifu anything…"
-            rows="1"
-            autocomplete="off"
-            spellcheck="true"
-          ></textarea>
+          <textarea id="messageInput"
+                    placeholder="Speak. The master is listening…"
+                    rows="1"
+                    autocomplete="off"
+                    spellcheck="true"
+                    data-testid="message-input"></textarea>
 
-          <!-- Send button -->
-          <button class="send-btn" id="sendBtn" disabled>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          <button class="send-btn" id="sendBtn" disabled data-testid="send-btn" title="Send (Enter)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 2 11 13"></path>
+              <path d="M22 2 15 22 11 13 2 9z"></path>
             </svg>
           </button>
         </div>
-        <p class="input-hint">Shifu uses CrewAI agents · Supports PDF, images & documents</p>
+        <p class="input-hint">
+          <span class="hint-dot"></span>
+          Powered by CrewAI agents · accepts pdf · images · documents
+        </p>
       </div>
 
     </main>
   </div>
 
-  <script src="/static/app.js"></script>
+  <!-- marked (markdown parser) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+  <!-- highlight.js (code syntax highlighting) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+  <script src="static/app.js"></script>
 </body>
 </html>
