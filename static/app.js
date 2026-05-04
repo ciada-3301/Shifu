@@ -276,18 +276,14 @@ async function sendMessage() {
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split('\n\n');
-      buffer = lines.pop();
-
+    function processSSEChunk(chunk) {
+      // Split on SSE double-newline boundaries
+      const lines = chunk.split('\n\n');
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ')) continue;
         try {
-          const evt = JSON.parse(line.slice(6));
+          const evt = JSON.parse(trimmed.slice(6));
           if (evt.type === 'ping') continue;
 
           removeThinkingBubble();
@@ -303,6 +299,21 @@ async function sendMessage() {
           }
         } catch { /* ignore parse errors on partial lines */ }
       }
+    }
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        // Flush any remaining data in buffer after stream closes
+        if (buffer.trim()) processSSEChunk(buffer);
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process all complete SSE messages (separated by \n\n)
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop(); // keep incomplete tail
+      processSSEChunk(parts.join('\n\n'));
     }
   } catch (err) {
     removeThinkingBubble();
