@@ -11,8 +11,13 @@ marked.setOptions({ breaks: true, gfm: true });
 const renderer = new marked.Renderer();
 
 // Override code blocks to inject copy button + language label
-renderer.code = (code, language) => {
-  const lang = language || 'text';
+// marked v4+ passes a token object {text, lang, ...}; older versions pass (code, language).
+// We handle both signatures here.
+renderer.code = function(tokenOrCode, maybeLanguage) {
+  const isTokenObj = tokenOrCode !== null && typeof tokenOrCode === 'object';
+  const code = isTokenObj ? (tokenOrCode.text ?? '') : String(tokenOrCode ?? '');
+  const lang = (isTokenObj ? tokenOrCode.lang : maybeLanguage) || 'text';
+
   let highlighted;
   try {
     highlighted = hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
