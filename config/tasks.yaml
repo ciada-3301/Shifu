@@ -1,6 +1,12 @@
-research_task:
+shifu_task:
   description: >
-    {user_input}
+    Process and fulfill the following user request: "{user_input}"
+    
+    If the request requires external data, use web search tools. 
+    If it involves code or files, use the file and command execution tools.
+    Ensure your response is accurate, technically sound, and directly addresses
+    the user's intent.
 
   expected_output: >
-    Helpful response to the user.
+    A clear, concise, and helpful formatted response. Include code blocks for programming tasks and step-by-step 
+    explanations for complex problems
