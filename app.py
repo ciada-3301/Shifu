@@ -148,6 +148,10 @@ def chat():
         "files": uploaded_files
     })
 
+    def sse(payload: dict) -> str:
+        # json.dumps escapes internal newlines so SSE frame is never split by content
+        return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
     def generate():
         result_q: queue.Queue = queue.Queue()
 
@@ -162,7 +166,7 @@ def chat():
         # Send SSE keepalives while waiting
         import time
         while t.is_alive():
-            yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+            yield sse({"type": "ping"})
             time.sleep(0.8)
 
         t.join()
@@ -173,9 +177,13 @@ def chat():
                 "role": "assistant",
                 "content": result['content']
             })
-            yield f"data: {json.dumps({'type': 'done', 'content': result['content'], 'conversation_id': conversation_id})}\n\n"
+            yield sse({
+                "type": "done",
+                "content": result['content'],
+                "conversation_id": conversation_id
+            })
         else:
-            yield f"data: {json.dumps({'type': 'error', 'content': result['content']})}\n\n"
+            yield sse({"type": "error", "content": result['content']})
 
     return Response(
         stream_with_context(generate()),
@@ -195,4 +203,4 @@ def get_history(conv_id: str):
 
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
+    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
