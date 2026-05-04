@@ -66,10 +66,11 @@ const filePreviewBar    = $('filePreviewBar');
 const convoList         = $('convoList');
 const chatTitle         = $('chatTitle');
 const newChatBtn        = $('newChatBtn');
-const clearBtn          = $('clearBtn');
 const sidebarToggle     = $('sidebarToggle');
 const mobileMenuBtn     = $('mobileMenuBtn');
 const sidebar           = $('sidebar');
+// clearBtn is optional — only wire it up if the element exists in the HTML
+const clearBtn          = $('clearBtn');
 
 
 // ── Conversation management ─────────────────
@@ -116,7 +117,7 @@ function renderConvoList() {
     const item = document.createElement('div');
     item.className = `convo-item ${conv.id === state.activeConvId ? 'active' : ''}`;
     item.innerHTML = `
-      <span class="convo-icon">💬</span>
+      <span class="convo-icon">◈</span>
       <span class="convo-label">${escHtml(conv.title)}</span>
     `;
     item.addEventListener('click', () => switchConversation(conv.id));
@@ -145,14 +146,30 @@ function buildWelcomeScreen() {
   div.id = 'welcomeScreen';
   div.className = 'welcome-screen';
   div.innerHTML = `
-    <div class="welcome-icon">🥷</div>
-    <h1 class="welcome-title">Shifu is ready</h1>
-    <p class="welcome-sub">Your personal AI assistant, powered by CrewAI agents.<br/>Ask anything — search the web, read files, browse directories.</p>
+    <div class="welcome-mark" aria-hidden="true">
+      <span class="welcome-kanji">師</span>
+      <span class="welcome-ring"></span>
+    </div>
+    <h1 class="welcome-title"><em>What</em> may the master answer?</h1>
+    <p class="welcome-sub">A studied AI tempered by CrewAI agents — capable of searching the open web, reading your files, and walking your filesystem with the patience of an old hand.</p>
+    <div class="welcome-divider" aria-hidden="true">
+      <span class="dv-line"></span>
+      <span class="dv-diamond"></span>
+      <span class="dv-line"></span>
+    </div>
     <div class="welcome-chips">
-      <button class="chip" data-prompt="Search the web for the latest AI news today">🔍 Latest AI news</button>
-      <button class="chip" data-prompt="List the files in my current directory">📁 Browse directory</button>
-      <button class="chip" data-prompt="Write a Python function to read a PDF and extract text">🐍 Python snippet</button>
-      <button class="chip" data-prompt="Explain the difference between RAG and fine-tuning">🧠 RAG vs fine-tuning</button>
+      <button class="chip" data-prompt="Search the web for the latest AI news today">
+        <span class="chip-glyph">◇</span><span>Search the open web</span>
+      </button>
+      <button class="chip" data-prompt="List the files in my current directory">
+        <span class="chip-glyph">◇</span><span>Walk this directory</span>
+      </button>
+      <button class="chip" data-prompt="Write a Python function to read a PDF and extract text">
+        <span class="chip-glyph">◇</span><span>Draft a Python script</span>
+      </button>
+      <button class="chip" data-prompt="Explain the difference between RAG and fine-tuning">
+        <span class="chip-glyph">◇</span><span>Teach me RAG vs fine-tune</span>
+      </button>
     </div>
   `;
   div.querySelectorAll('.chip').forEach(chip =>
@@ -166,8 +183,10 @@ function appendMessageDOM(msg, animate = false) {
   row.className = `message-row ${msg.role}`;
   if (animate) row.style.animationDuration = '0.3s';
 
-  const avatarChar = msg.role === 'user' ? '👤' : '🥷';
-  const avatarClass = msg.role === 'user' ? 'user-avatar' : 'ai-avatar';
+  // FIX: ai-avatar renders the kanji via CSS ::before — pass empty string so
+  // the emoji doesn't double-render on top of it. User avatar gets initials.
+  const avatarContent = msg.role === 'user' ? 'You' : '';
+  const avatarClass   = msg.role === 'user' ? 'user-avatar' : 'ai-avatar';
 
   let filesHtml = '';
   if (msg.files && msg.files.length) {
@@ -186,7 +205,7 @@ function appendMessageDOM(msg, animate = false) {
     : `<p>${escHtml(msg.content || '')}</p>`;
 
   row.innerHTML = `
-    <div class="avatar ${avatarClass}">${avatarChar}</div>
+    <div class="avatar ${avatarClass}">${avatarContent}</div>
     <div class="bubble">
       ${contentHtml}
       ${filesHtml}
@@ -203,7 +222,7 @@ function appendThinkingBubble() {
   row.className = 'message-row assistant';
   row.id = 'thinkingRow';
   row.innerHTML = `
-    <div class="avatar ai-avatar">🥷</div>
+    <div class="avatar ai-avatar"></div>
     <div class="bubble thinking-bubble">
       <div class="dot"></div>
       <div class="dot"></div>
@@ -516,16 +535,20 @@ newChatBtn.addEventListener('click', () => {
   closeMobileSidebar();
 });
 
-clearBtn.addEventListener('click', () => {
-  const conv = getActiveConv();
-  if (!conv || !conv.messages.length) return;
-  if (!confirm('Clear this conversation?')) return;
-  conv.messages = [];
-  conv.title = 'New conversation';
-  renderMessages();
-  renderConvoList();
-  chatTitle.textContent = 'New conversation';
-});
+// FIX: clearBtn is optional (no element with id="clearBtn" exists in the HTML).
+// Guard with a null check so the script doesn't crash and kill all other listeners.
+if (clearBtn) {
+  clearBtn.addEventListener('click', () => {
+    const conv = getActiveConv();
+    if (!conv || !conv.messages.length) return;
+    if (!confirm('Clear this conversation?')) return;
+    conv.messages = [];
+    conv.title = 'New conversation';
+    renderMessages();
+    renderConvoList();
+    chatTitle.textContent = 'New conversation';
+  });
+}
 
 // Drag-and-drop on the whole page
 document.addEventListener('dragover', e => { e.preventDefault(); });
@@ -535,7 +558,7 @@ document.addEventListener('drop', async e => {
   for (const f of files) await uploadFile(f);
 });
 
-// Chips on the initial welcome screen
+// Chips on the initial welcome screen (static HTML — dynamic ones handled in buildWelcomeScreen)
 document.querySelectorAll('.chip').forEach(chip => {
   chip.addEventListener('click', () => handleChip(chip.dataset.prompt));
 });
