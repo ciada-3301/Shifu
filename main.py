@@ -10,8 +10,7 @@ from crewai_tools import (
     DirectoryReadTool,
     DirectorySearchTool,
     PDFSearchTool,
-    CodeInterpreterTool
-)
+    )
 
 load_dotenv()
 
@@ -42,7 +41,7 @@ class ShifuAssistantCrew():
                 DirectoryReadTool(),
                 DirectorySearchTool(),
                 PDFSearchTool(),
-                CodeInterpreterTool()
+                
             ],
             llm=shifu_llm,
             verbose=True,
@@ -50,9 +49,9 @@ class ShifuAssistantCrew():
         )
 
     @task
-    def assistant_task(self) -> Task:
+    def shifu_task(self) -> Task:
         return Task(
-            config=self.tasks_config['assistant_task'], # Update your tasks.yaml to have an 'assistant_task'
+            config=self.tasks_config['shifu_task'], # Update your tasks.yaml to have an 'assistant_task'
             agent=self.shifu()
         )
 
@@ -60,7 +59,7 @@ class ShifuAssistantCrew():
     def crew(self) -> Crew:
         return Crew(
             agents=[self.shifu()],
-            tasks=[self.assistant_task()],
+            tasks=[self.shifu_task()],
             process=Process.sequential,
             verbose=True
         )
