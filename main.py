@@ -1,12 +1,20 @@
 from crewai import Agent, Crew, Task
 from crewai.project import CrewBase, agent, crew, task
-
+from crewai import LLM
+import os
+from dotenv import load_dotenv
+from crewai.tools import BaseTool
 from crewai_tools import SerperDevTool
-from langchain_ollama import ChatOllama
+load_dotenv()
 
-local_llm = ChatOllama(
-    model="qwen2.5:3b",
-    base_url="http://localhost:11434"
+ollama_api_key = os.getenv("OLLAMA_API_KEY")
+
+
+
+cloud_llm = LLM(
+    model="ollama/gemma4:31b",
+    base_url="https://ollama.com",
+    api_key=ollama_api_key
 )
 
 @CrewBase
@@ -20,14 +28,15 @@ class MyCrew():
         return Agent(
             config=self.agents_config['researcher'],
             tools=[SerperDevTool()],
-            llm=local_llm,
+            llm=cloud_llm,
             verbose=True
         )
 
     @task
     def research_task(self) -> Task:
         return Task(
-            config=self.tasks_config['research_task']
+            config=self.tasks_config['research_task'],
+            agent=self.researcher()
         )
 
     @crew
@@ -38,9 +47,9 @@ class MyCrew():
             verbose=True
         )
 
-
+prompt = input("..> ")
 inputs = {
-    "user_input": "Latest AI news"
+    "user_input": prompt
 }
 
 result = MyCrew().crew().kickoff(inputs=inputs)
