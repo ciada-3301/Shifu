@@ -1,38 +1,25 @@
 #!/usr/bin/env python3
 """
-╔═══════════════════════════════════════════════╗
-║         S H I F U   T E R M I N A L           ║
-║         Powered by CrewAI + Ollama            ║
-╚═══════════════════════════════════════════════╝
-
-A Jarvis-style terminal interface for the Shifu AI Crew.
-Drop this file alongside your crew.py and run it directly.
+╔══════════════════════════════╗
+║   S H I F U  T E R M I N A L ║
+╚══════════════════════════════╝
 """
 
-import sys
-import os
-import io
-import time
-import threading
-import itertools
-import textwrap
-import random
+import sys, os, time, threading, itertools, textwrap, re, random
 from datetime import datetime
-PLAYGROUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Playground")
+
+PLAYGROUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playground")
 os.makedirs(PLAYGROUND_DIR, exist_ok=True)
 
-# ── Colour palette (ANSI) ───────────────────────────────────────────────────
+
+# ── Colours ────────────────────────────────────────────────────────────────────
 class C:
-    RESET   = "\033[0m"
+    R       = "\033[0m"
     BOLD    = "\033[1m"
     DIM     = "\033[2m"
     ITALIC  = "\033[3m"
-
-    # Cyan / teal family  →  primary "arc-reactor" glow
     CYAN    = "\033[96m"
     DCYAN   = "\033[36m"
-
-    # Accent colours
     GOLD    = "\033[93m"
     RED     = "\033[91m"
     GREEN   = "\033[92m"
@@ -40,101 +27,22 @@ class C:
     WHITE   = "\033[97m"
     GREY    = "\033[90m"
 
-    # Compound helpers
-    PROMPT  = f"\033[96m\033[1m"          # bold cyan for the input caret
-    SHIFU   = f"\033[93m\033[1m"          # gold-bold for Shifu's replies
-    SYS     = f"\033[90m"                  # dim grey for system/metadata lines
-    ERR     = f"\033[91m\033[1m"          # bold red for errors
-    OK      = f"\033[92m\033[1m"          # bold green for success
+
+def tw() -> int:
+    try:    return os.get_terminal_size().columns
+    except: return 100
+
+def div(ch="─", col=C.DCYAN):
+    print("  " + col + ch * (tw() - 4) + C.R)
+
+def blank(): print()
+
+def pl(text="", col=C.WHITE, indent=2):
+    print(" " * indent + col + text + C.R)
 
 
-# ── Terminal dimensions ──────────────────────────────────────────────────────
-def term_width() -> int:
-    try:
-        return os.get_terminal_size().columns
-    except OSError:
-        return 100
-
-
-# ── Typewriter printer ───────────────────────────────────────────────────────
-def typewrite(text: str, colour: str = C.WHITE, delay: float = 0.012, indent: int = 0) -> None:
-    prefix = " " * indent
-    for ch in text:
-        sys.stdout.write(colour + ch + C.RESET)
-        sys.stdout.flush()
-        if ch not in (" ", "\n"):
-            time.sleep(delay * random.uniform(0.5, 1.5))
-    sys.stdout.write("\n")
-
-
-def print_line(text: str = "", colour: str = C.WHITE, indent: int = 2) -> None:
-    print(" " * indent + colour + text + C.RESET)
-
-
-def divider(char: str = "─", colour: str = C.DCYAN) -> None:
-    w = term_width() - 4
-    print(" " * 2 + colour + char * w + C.RESET)
-
-
-def blank() -> None:
-    print()
-
-
-# ── Animated spinner ─────────────────────────────────────────────────────────
-class Spinner:
-    FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
-    TAGS   = [
-        "ANALYZING REQUEST",
-        "QUERYING KNOWLEDGE BASE",
-        "CROSS-REFERENCING DATA",
-        "RUNNING AGENT PIPELINE",
-        "SYNTHESIZING RESPONSE",
-        "CALIBRATING INFERENCE",
-    ]
-
-    def __init__(self, message: str = "PROCESSING"):
-        self.message   = message
-        self._stop_evt = threading.Event()
-        self._thread   = threading.Thread(target=self._spin, daemon=True)
-
-    def _spin(self) -> None:
-        cycle  = itertools.cycle(self.FRAMES)
-        tags   = itertools.cycle(self.TAGS)
-        tag    = next(tags)
-        t_next = time.time() + 2.5
-        while not self._stop_evt.is_set():
-            frame = next(cycle)
-            line  = (f"  {C.CYAN}{frame}{C.RESET}  "
-                     f"{C.DIM}{C.CYAN}[ {tag} ]{C.RESET}   ")
-            sys.stdout.write("\r" + line)
-            sys.stdout.flush()
-            time.sleep(0.08)
-            if time.time() >= t_next:
-                tag    = next(tags)
-                t_next = time.time() + 2.5
-
-    def start(self) -> "Spinner":
-        self._thread.start()
-        return self
-
-    def stop(self) -> None:
-        self._stop_evt.set()
-        self._thread.join()
-        sys.stdout.write("\r" + " " * (term_width() - 2) + "\r")
-        sys.stdout.flush()
-
-
-# ── Boot sequence ─────────────────────────────────────────────────────────────
-BOOT_LINES = [
-    ("SHIFU NEURAL CORE", C.CYAN + C.BOLD,  0.04),
-    ("Initializing CrewAI runtime …",        C.GREY,  0.02),
-    ("Loading agent configuration …",        C.GREY,  0.02),
-    ("Connecting to Ollama endpoint …",      C.GREY,  0.02),
-    ("Mounting tool suite  [SERPER / PDF / FS]", C.GREY, 0.02),
-    ("All systems nominal.",                 C.GREEN + C.BOLD, 0.03),
-]
-
-ASCII_LOGO = r"""
+# ── ASCII boot ─────────────────────────────────────────────────────────────────
+LOGO = r"""
   ███████╗██╗  ██╗██╗███████╗██╗   ██╗
   ██╔════╝██║  ██║██║██╔════╝██║   ██║
   ███████╗███████║██║█████╗  ██║   ██║
@@ -143,554 +51,376 @@ ASCII_LOGO = r"""
   ╚══════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═════╝
 """
 
-def boot_sequence() -> None:
+def boot():
     os.system("cls" if os.name == "nt" else "clear")
     blank()
-
-    for line in ASCII_LOGO.split("\n"):
-        print(C.CYAN + C.BOLD + "  " + line + C.RESET)
-        time.sleep(0.03)
-
+    for line in LOGO.split("\n"):
+        print(C.CYAN + C.BOLD + "  " + line + C.R)
+        time.sleep(0.025)
     blank()
-    divider("═")
+    div("═")
     blank()
-
-    for text, colour, spd in BOOT_LINES:
-        sys.stdout.write("  " + colour)
-        for ch in text:
-            sys.stdout.write(ch)
-            sys.stdout.flush()
-            time.sleep(spd)
-        sys.stdout.write(C.RESET + "\n")
-        time.sleep(0.12)
-
+    ts = datetime.now().strftime("%a %d %b %Y  •  %H:%M:%S")
+    pl(f"{C.GREY}{ts}", indent=2)
+    pl(f"{C.GREY}type  help  •  exit to quit", indent=2)
     blank()
-    divider()
-    blank()
-
-    ts = datetime.now().strftime("%A, %d %b %Y  •  %H:%M:%S")
-    print_line(f"SESSION STARTED  {ts}", C.SYS)
-    print_line("Type  'help'  for commands  •  'exit' / 'quit' to terminate", C.SYS)
-    blank()
-    divider("═")
+    div("═")
     blank()
 
 
-# ── Help panel ────────────────────────────────────────────────────────────────
-def show_help() -> None:
-    blank()
-    divider()
-    print_line("AVAILABLE COMMANDS", C.GOLD + C.BOLD)
-    blank()
-    cmds = [
-        ("help",           "Display this panel"),
-        ("clear  /  cls",  "Clear the terminal"),
-        ("history",        "Show conversation history"),
-        ("status",         "Print crew / LLM status"),
-        ("exit  /  quit",  "Shut down Shifu"),
-        ("<any text>",     "Send a query to the Shifu agent"),
+# ── Live action display ────────────────────────────────────────────────────────
+# Instead of a spinner with generic rotating tags, we show what the agent is
+# actually doing — tool calls, file writes, code runs — as they happen.
+# CrewAI doesn't expose a streaming callback natively, so we hook into stdout.
+
+class ActionStream:
+    """
+    Wraps the real stdout/stderr during the crew run.
+    Intercepts CrewAI's internal print() calls and surfaces
+    meaningful action lines — everything else is suppressed.
+
+    Acts as a full stdout proxy so nothing crashes on writelines/isatty/etc.
+    """
+
+    _PATTERNS = [
+        (re.compile(r'serper|web.?search|search.?query', re.I),  "Searching the web"),
+        (re.compile(r'fetch|http|request|url', re.I),            "Fetching URL"),
+        (re.compile(r'(writ|creat).{0,10}(file|path)', re.I),    "Writing file"),
+        (re.compile(r'(read|open|load).{0,10}(file|path)', re.I),"Reading file"),
+        (re.compile(r'execut|terminal|bash|subprocess|pip\b', re.I), "Running code"),
+        (re.compile(r'director|scandir|listdir|tree\b', re.I),   "Scanning directory"),
+        (re.compile(r'\bplanning\b|\bplan\b.*task', re.I),        "Planning"),
+        (re.compile(r'agent.*start|starting.*agent|task.*start', re.I), "Agent working"),
     ]
-    for cmd, desc in cmds:
-        print_line(f"  {C.CYAN}{cmd:<22}{C.RESET}{C.WHITE}{desc}", indent=2)
-    blank()
-    divider()
-    blank()
+
+    def __init__(self, t0: float, real_stdout):
+        self._real   = real_stdout
+        self._t0     = t0
+        self._last   = ""
+        self._lock   = threading.Lock()
+        self._buf    = ""          # line buffer
+
+    def _show(self, label: str):
+        if label == self._last:
+            return
+        self._last = label
+        elapsed = time.time() - self._t0
+        line = (f"\r  {C.GREY}{elapsed:5.1f}s{C.R}  "
+                f"{C.DCYAN}·{C.R}  {C.WHITE}{label}{C.R}          \n")
+        with self._lock:
+            self._real.write(line)
+            self._real.flush()
+
+    def _process(self, text: str):
+        for pattern, label in self._PATTERNS:
+            if pattern.search(text):
+                self._show(label + " …")
+                return
+        m = re.search(r'(?:tool|using)[:\s]+([^\n\r]{3,40})', text, re.I)
+        if m:
+            self._show(f"Tool  {m.group(1).strip()} …")
+            return
+        m = re.search(r'[\w./\\-]+\.(py|js|ts|json|csv|txt|md|yaml|sh)\b', text)
+        if m:
+            self._show(f"↳  {m.group(0)}")
+
+    def write(self, data: str):
+        # Buffer until newline so we process whole lines
+        self._buf += data
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line.strip()
+            if line:
+                self._process(line)
+
+    # ── Full stdout proxy — must implement everything ──────────────────────
+    def flush(self):                    pass
+    def isatty(self):                   return False
+    def writelines(self, lines):
+        for l in lines: self.write(l)
+    def fileno(self):                   return self._real.fileno()
+    def readable(self):                 return False
+    def writable(self):                 return True
+    def seekable(self):                 return False
+    @property
+    def encoding(self):                 return self._real.encoding
+    @property
+    def errors(self):                   return self._real.errors
 
 
-# ── Status panel ──────────────────────────────────────────────────────────────
-def show_status(crew_loaded: bool) -> None:
-    blank()
-    divider()
-    print_line("SYSTEM STATUS", C.GOLD + C.BOLD)
-    blank()
+# ── Minimal inline markdown renderer ──────────────────────────────────────────
+_DELAY_PROSE = 0.007
+_DELAY_CODE  = 0.003
 
-    rows = [
-        ("Agent",    "Shifu (Smart Router)",  C.CYAN),
-        ("Model",    "ollama/gpt-oss:120b",   C.CYAN),
-        ("Process",  "Sequential + Routing",  C.CYAN),
-        ("Routes",   "DIRECT · RESEARCH · FILE_OPS · CODE", C.CYAN),
-        ("Tools",    "Serper · FS · Terminal", C.CYAN),
-        ("Crew",     "LOADED" if crew_loaded else "NOT LOADED",
-                     C.GREEN if crew_loaded else C.RED),
-    ]
-    for label, val, col in rows:
-        print_line(f"  {C.GREY}{label:<14}{col}{val}", indent=2)
+class _K:
+    BG       = "\033[48;5;235m"
+    RBGR     = "\033[49m"
+    KW       = "\033[38;5;81m"
+    STR      = "\033[38;5;215m"
+    CMT      = "\033[38;5;244m\033[3m"
+    NUM      = "\033[38;5;141m"
+    PLAIN    = "\033[38;5;253m"
+    RESET    = "\033[0m"
 
-    blank()
-    divider()
-    blank()
+_PY_KW = {"def","class","return","import","from","as","if","elif","else",
+          "for","while","with","in","not","and","or","is","None","True",
+          "False","try","except","finally","raise","pass","break","continue",
+          "lambda","yield","async","await","global","nonlocal"}
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STREAMING MARKDOWN RENDERER
-# Parses the agent's output token-by-token and applies rich ANSI styling.
-# Handles: code blocks (with language tag + syntax highlight), inline code,
-#          bold, italic, headers (H1-H3), bullet/numbered lists, blockquotes,
-#          horizontal rules — all streamed character-by-character like AI sites.
-# ══════════════════════════════════════════════════════════════════════════════
-
-import re
-
-# ── Tiny Python syntax highlighter (ANSI) ────────────────────────────────────
-_PY_KEYWORDS   = {"def","class","return","import","from","as","if","elif","else",
-                  "for","while","with","in","not","and","or","is","None","True",
-                  "False","try","except","finally","raise","pass","break",
-                  "continue","lambda","yield","async","await","global","nonlocal",
-                  "del","assert","print"}
-_PY_BUILTINS   = {"len","range","print","input","type","str","int","float","list",
-                  "dict","set","tuple","open","enumerate","zip","map","filter",
-                  "sorted","reversed","any","all","hasattr","getattr","setattr",
-                  "isinstance","issubclass","super","self","cls"}
-
-# ANSI for code-block interior
-class _K:                                # code colour palette
-    BG        = "\033[48;5;235m"         # dark grey background
-    RESET_BG  = "\033[49m"
-    KW        = "\033[38;5;81m"          # bright sky-blue  → keywords
-    BUILTIN   = "\033[38;5;150m"         # soft green       → builtins
-    STRING    = "\033[38;5;215m"         # warm orange      → strings
-    COMMENT   = "\033[38;5;244m\033[3m"  # grey italic      → comments
-    NUMBER    = "\033[38;5;141m"         # lavender         → numbers
-    DECORATOR = "\033[38;5;213m"         # pink             → decorators
-    PLAIN     = "\033[38;5;253m"         # near-white       → everything else
-    RESET     = "\033[0m"
-
-
-def _highlight_python(code: str) -> str:
-    """Return ANSI-coloured Python code string (no streaming, called per block)."""
-    lines_out = []
-    for raw_line in code.split("\n"):
-        line = raw_line
-
-        # comments
-        if re.match(r"\s*#", line):
-            lines_out.append(_K.COMMENT + line + _K.RESET)
-            continue
-
-        # tokenise with regex, process left→right
-        result = ""
-        pos = 0
-        token_re = re.compile(
-            r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^"\n]*"|\'[^\'\\n]*\')'  # strings
-            r'|(\b\d+\.?\d*\b)'            # numbers
-            r'|(@\w+)'                      # decorators
-            r'|(\b\w+\b)'                   # identifiers / keywords
-        )
-        for m in token_re.finditer(line):
-            # literal text before this token
-            result += _K.PLAIN + line[pos:m.start()]
-            tok = m.group()
-            if m.group(1):                  result += _K.STRING    + tok
-            elif m.group(2):               result += _K.NUMBER    + tok
-            elif m.group(3):               result += _K.DECORATOR + tok
-            elif tok in _PY_KEYWORDS:      result += _K.KW        + tok
-            elif tok in _PY_BUILTINS:      result += _K.BUILTIN   + tok
-            else:                          result += _K.PLAIN     + tok
+def _hl_python(code: str) -> str:
+    out = []
+    for raw in code.split("\n"):
+        if re.match(r"\s*#", raw):
+            out.append(_K.CMT + raw + _K.RESET); continue
+        res, pos = "", 0
+        for m in re.finditer(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^"\n]*"|\'[^\'\\n]*\')'
+                              r'|(\b\d+\.?\d*\b)|(\b\w+\b)', raw):
+            res += _K.PLAIN + raw[pos:m.start()]
+            t = m.group()
+            if   m.group(1): res += _K.STR + t
+            elif m.group(2): res += _K.NUM + t
+            elif t in _PY_KW: res += _K.KW + t
+            else:             res += _K.PLAIN + t
             pos = m.end()
-        result += _K.PLAIN + line[pos:]
-        lines_out.append(result + _K.RESET)
+        res += _K.PLAIN + raw[pos:]
+        out.append(res + _K.RESET)
+    return "\n".join(out)
 
-    return "\n".join(lines_out)
+def _inline(t: str) -> str:
+    t = re.sub(r'`([^`]+)`',   _K.BG + _K.STR + r' \1 ' + C.R + C.WHITE, t)
+    t = re.sub(r'\*\*(.+?)\*\*', C.BOLD + C.WHITE + r'\1' + C.R + C.WHITE, t)
+    t = re.sub(r'\*(.+?)\*',   C.ITALIC + C.CYAN + r'\1' + C.R + C.WHITE, t)
+    return t
 
-
-def _highlight_generic(code: str) -> str:
-    """Light highlighting for non-Python code (strings, numbers, comments)."""
-    result = ""
-    for line in code.split("\n"):
-        if re.match(r"\s*(#|//|--)", line):
-            result += _K.COMMENT + line + _K.RESET + "\n"
-        else:
-            # strings
-            line2 = re.sub(r'(".*?"|\'.*?\')', _K.STRING + r'\1' + _K.PLAIN, line)
-            # numbers
-            line2 = re.sub(r'\b(\d+\.?\d*)\b', _K.NUMBER + r'\1' + _K.PLAIN, line2)
-            result += _K.PLAIN + line2 + _K.RESET + "\n"
-    return result.rstrip("\n")
-
-
-# ── Stream a styled string token-by-token ────────────────────────────────────
-_TOKEN_DELAY  = 0.008   # seconds per character (prose)
-_CODE_DELAY   = 0.004   # faster inside code blocks
-
-def _stream(text: str, delay: float = _TOKEN_DELAY) -> None:
-    """Write text to stdout one character at a time."""
+def _stream(text: str, delay: float = _DELAY_PROSE):
     for ch in text:
-        sys.stdout.write(ch)
-        sys.stdout.flush()
+        sys.stdout.write(ch); sys.stdout.flush()
         if ch not in (" ", "\n", "\t"):
             time.sleep(delay * random.uniform(0.6, 1.3))
 
+def _sline(text: str, delay=_DELAY_PROSE):
+    _stream(text, delay); sys.stdout.write("\n"); sys.stdout.flush()
 
-def _stream_line(text: str, delay: float = _TOKEN_DELAY) -> None:
-    _stream(text, delay)
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+def _code_block(lang: str, code: str):
+    w     = min(tw() - 6, 88)
+    lang  = (lang or "code").strip().lower()
+    label = f" {lang} "
+    top   = "╭──" + label + "─" * max(0, w - len(label) - 3)
+    sys.stdout.write("\n  " + C.DCYAN + top + C.R + "\n")
+    hl = _hl_python(code) if lang in ("python", "py") else code
+    for line in hl.split("\n"):
+        sys.stdout.write("  " + C.DCYAN + "│" + C.R + _K.BG + "  " + line + "  " + _K.RESET + "\n")
+        sys.stdout.flush(); time.sleep(_DELAY_CODE)
+    sys.stdout.write("  " + C.DCYAN + "╰" + "─" * w + C.R + "\n\n"); sys.stdout.flush()
 
+def render(text: str, elapsed: float):
+    blank()
+    div("─", C.GOLD)
+    pl(f"shifu  ›  {datetime.now().strftime('%H:%M:%S')}  ({elapsed:.1f}s)", C.GOLD + C.BOLD)
+    div("─", C.GOLD)
+    blank()
 
-# ── Inline markdown → ANSI (bold, italic, inline-code) ───────────────────────
-def _inline(text: str) -> str:
-    """Convert inline markdown spans to ANSI escape sequences."""
-    # inline code  `...`
-    text = re.sub(r'`([^`]+)`',
-                  _K.BG + _K.STRING + r' \1 ' + C.RESET + C.WHITE, text)
-    # bold  **...**  or  __...__
-    text = re.sub(r'\*\*(.+?)\*\*|__(.+?)__',
-                  C.BOLD + C.WHITE + r'\1\2' + C.RESET + C.WHITE, text)
-    # italic  *...*  or  _..._
-    text = re.sub(r'\*(.+?)\*|_(.+?)_',
-                  C.ITALIC + C.CYAN + r'\1\2' + C.RESET + C.WHITE, text)
-    return text
-
-
-# ── Code-block renderer ───────────────────────────────────────────────────────
-_CB_TOP    = "╭"
-_CB_BOT    = "╰"
-_CB_SIDE   = "│"
-_CB_FILL   = "─"
-
-def _render_code_block(lang: str, code: str) -> None:
-    """Pretty-print a fenced code block with language tag and syntax colours."""
-    w       = min(term_width() - 6, 90)
-    lang    = (lang or "code").strip().lower()
-    label   = f" {lang} "
-    top_bar = (_CB_TOP + _CB_FILL * 2 + label
-               + _CB_FILL * max(0, w - len(label) - 3) + " ")
-
-    # header
-    sys.stdout.write("\n  " + C.DCYAN + top_bar + C.RESET + "\n")
-
-    # syntax-highlight
-    if lang in ("python", "py"):
-        highlighted = _highlight_python(code)
-    else:
-        highlighted = _highlight_generic(code)
-
-    # stream each line with side-bar
-    for line in highlighted.split("\n"):
-        sys.stdout.write("  " + C.DCYAN + _CB_SIDE + C.RESET
-                         + _K.BG + "  " + line + "  " + _K.RESET + "\n")
-        sys.stdout.flush()
-        time.sleep(_CODE_DELAY)
-
-    # footer
-    sys.stdout.write("  " + C.DCYAN + _CB_BOT + _CB_FILL * (w) + C.RESET + "\n\n")
-    sys.stdout.flush()
-
-
-# ── Main markdown stream renderer ─────────────────────────────────────────────
-def _render_markdown_stream(text: str) -> None:
-    """
-    Parse and stream `text` as markdown, applying rich ANSI styling.
-    Processes line-by-line; handles fenced code blocks as atomic units.
-    """
-    lines       = text.split("\n")
-    i           = 0
-    indent      = "    "
-    width       = term_width() - 10
-
+    lines = str(text).split("\n")
+    W     = tw() - 10
+    i     = 0
+    PAD   = "    "
     while i < len(lines):
-        line = lines[i]
+        ln = lines[i]
 
-        # ── fenced code block  ```lang ... ``` ────────────────────────────
-        fence_open = re.match(r'^```(\w*)', line)
-        if fence_open:
-            lang        = fence_open.group(1)
-            code_lines  = []
+        if re.match(r'^```(\w*)', ln):
+            lang, body = re.match(r'^```(\w*)', ln).group(1), []
             i += 1
             while i < len(lines) and not lines[i].startswith("```"):
-                code_lines.append(lines[i])
-                i += 1
-            _render_code_block(lang, "\n".join(code_lines))
-            i += 1
-            continue
+                body.append(lines[i]); i += 1
+            _code_block(lang, "\n".join(body)); i += 1; continue
 
-        # ── blank line ────────────────────────────────────────────────────
-        if line.strip() == "":
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            i += 1
-            continue
+        if ln.strip() == "":
+            sys.stdout.write("\n"); sys.stdout.flush(); i += 1; continue
 
-        # ── H1  #  ────────────────────────────────────────────────────────
-        if line.startswith("# "):
-            content = line[2:].strip()
-            sys.stdout.write("\n")
-            _stream_line(indent + C.BOLD + C.CYAN + "  ◈  " + content.upper() + "  ◈" + C.RESET)
-            sys.stdout.write("\n")
-            i += 1
-            continue
+        if ln.startswith("# "):
+            _sline("\n" + PAD + C.BOLD + C.CYAN + "◈  " + ln[2:].upper() + "  ◈" + C.R + "\n"); i += 1; continue
+        if ln.startswith("## "):
+            _sline("\n" + PAD + C.BOLD + C.GOLD + "▸  " + ln[3:] + C.R); i += 1; continue
+        if ln.startswith("### "):
+            _sline(PAD + C.BOLD + C.MAGENTA + "›  " + ln[4:] + C.R); i += 1; continue
+        if re.match(r'^[-*_]{3,}\s*$', ln):
+            sys.stdout.write("  " + C.DCYAN + "━" * (tw() - 6) + C.R + "\n"); i += 1; continue
+        if ln.startswith("> "):
+            _sline("  " + C.DCYAN + "▌ " + C.R + C.ITALIC + C.GREY + _inline(ln[2:]) + C.R); i += 1; continue
 
-        # ── H2  ##  ───────────────────────────────────────────────────────
-        if line.startswith("## "):
-            content = line[3:].strip()
-            sys.stdout.write("\n")
-            _stream_line(indent + C.BOLD + C.GOLD + "  ▸  " + content + C.RESET)
-            sys.stdout.write("  " + C.DCYAN + "─" * (len(content) + 6) + C.RESET + "\n")
-            i += 1
-            continue
+        bm = re.match(r'^(\s*)[-*+] (.+)', ln)
+        if bm:
+            lvl = len(bm.group(1)) // 2
+            dot = ["◆","◇","·"][min(lvl, 2)]
+            col = [C.CYAN, C.GOLD, C.GREY][min(lvl, 2)]
+            _sline(PAD + "  " * lvl + col + dot + " " + C.WHITE + _inline(bm.group(2)) + C.R); i += 1; continue
 
-        # ── H3  ###  ──────────────────────────────────────────────────────
-        if line.startswith("### "):
-            content = line[4:].strip()
-            _stream_line(indent + C.BOLD + C.MAGENTA + "  ›  " + content + C.RESET)
-            i += 1
-            continue
+        nm = re.match(r'^(\s*)(\d+)\. (.+)', ln)
+        if nm:
+            lvl = len(nm.group(1)) // 2
+            _sline(PAD + "  " * lvl + C.GOLD + nm.group(2) + "." + C.WHITE + " " + _inline(nm.group(3)) + C.R); i += 1; continue
 
-        # ── horizontal rule  ---  or  ***  ───────────────────────────────
-        if re.match(r'^[-*_]{3,}\s*$', line):
-            sys.stdout.write("  " + C.DCYAN + "━" * (term_width() - 6) + C.RESET + "\n")
-            i += 1
-            continue
-
-        # ── blockquote  >  ────────────────────────────────────────────────
-        if line.startswith("> "):
-            content = _inline(line[2:])
-            _stream_line("  " + C.DCYAN + "▌ " + C.RESET + C.ITALIC + C.GREY + content + C.RESET)
-            i += 1
-            continue
-
-        # ── unordered bullet  - / * / +  ─────────────────────────────────
-        bullet_m = re.match(r'^(\s*)[-*+] (.+)', line)
-        if bullet_m:
-            lvl     = len(bullet_m.group(1)) // 2
-            content = _inline(bullet_m.group(2))
-            dot     = ["◆", "◇", "·"][min(lvl, 2)]
-            colour  = [C.CYAN, C.GOLD, C.GREY][min(lvl, 2)]
-            prefix  = indent + "  " * lvl + colour + dot + " " + C.WHITE
-            # wrap long bullets
-            raw_len = len(bullet_m.group(2))
-            if raw_len > width - 6:
-                wrapped = textwrap.fill(bullet_m.group(2), width=width - 6)
-                first   = True
-                for wl in wrapped.split("\n"):
-                    if first:
-                        _stream_line(prefix + _inline(wl) + C.RESET)
-                        first = False
-                    else:
-                        _stream_line(indent + "  " * lvl + "  " + C.WHITE + _inline(wl) + C.RESET)
-            else:
-                _stream_line(prefix + content + C.RESET)
-            i += 1
-            continue
-
-        # ── ordered list  1.  2.  …  ─────────────────────────────────────
-        num_m = re.match(r'^(\s*)(\d+)\. (.+)', line)
-        if num_m:
-            lvl     = len(num_m.group(1)) // 2
-            num     = num_m.group(2)
-            content = _inline(num_m.group(3))
-            prefix  = indent + "  " * lvl + C.GOLD + f"{num}." + C.WHITE + " "
-            _stream_line(prefix + content + C.RESET)
-            i += 1
-            continue
-
-        # ── plain paragraph ───────────────────────────────────────────────
-        content = _inline(line)
-        wrapped = textwrap.fill(line, width=width)   # wrap on raw text first
-        for wl in wrapped.split("\n"):
-            _stream_line(indent + C.WHITE + _inline(wl) + C.RESET, delay=_TOKEN_DELAY)
+        for wl in textwrap.fill(ln, width=W).split("\n"):
+            _sline(PAD + C.WHITE + _inline(wl) + C.R)
         i += 1
 
-
-# ── Public render entry point ─────────────────────────────────────────────────
-def render_response(result: str, elapsed: float, route: str = "") -> None:
-    blank()
-    divider("─", C.GOLD)
-    route_tag = f"  [{route}]" if route else ""
-    print_line(
-        f"SHIFU  ›  {datetime.now().strftime('%H:%M:%S')}  ({elapsed:.1f}s){route_tag}",
-        C.GOLD + C.BOLD
-    )
-    divider("─", C.GOLD)
-    blank()
-
-    _render_markdown_stream(str(result))
-
-    blank()
-    divider("─", C.GOLD)
-    blank()
+    blank(); div("─", C.GOLD); blank()
 
 
-# ── History storage ───────────────────────────────────────────────────────────
-history: list[dict] = []
-
-def show_history() -> None:
-    if not history:
-        blank()
-        print_line("No queries yet this session.", C.GREY)
-        blank()
-        return
-    blank()
-    divider()
-    print_line("CONVERSATION HISTORY", C.GOLD + C.BOLD)
-    blank()
-    for i, entry in enumerate(history, 1):
-        ts  = entry["time"]
-        usr = entry["query"][:80] + ("…" if len(entry["query"]) > 80 else "")
-        print_line(f"  [{i:02d}]  {C.GREY}{ts}{C.RESET}  {C.WHITE}{usr}", indent=2)
-    blank()
-    divider()
-    blank()
-
-
-# ── Crew loader (lazy import so startup is fast) ──────────────────────────────
+# ── Crew loader ────────────────────────────────────────────────────────────────
 def load_crew():
-    """
-    Import ShifuAssistantCrew from crew.py in the same directory.
-    Returns (crew_instance, None) on success or (None, error_message) on failure.
-    """
-    # Add script directory to path so 'crew' is importable
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if script_dir not in sys.path:
-        sys.path.insert(0, script_dir)
-
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
     try:
-        from crew import ShifuAssistantCrew  # type: ignore
-        return ShifuAssistantCrew(), None
-    except ImportError as e:
-        return None, f"Could not import crew.py → {e}"
+        from crew import ShifuCrew  # type: ignore
+        return ShifuCrew(), None
     except Exception as e:
-        return None, f"Error initialising crew → {e}"
+        return None, str(e)
 
 
-# ── Input prompt ──────────────────────────────────────────────────────────────
+# ── Input prompt ───────────────────────────────────────────────────────────────
 def get_input() -> str:
     try:
         ts = datetime.now().strftime("%H:%M")
-        raw = input(f"  {C.GREY}[{ts}]{C.RESET} {C.PROMPT}YOU ›{C.RESET}  ")
-        return raw.strip()
+        return input(f"  {C.GREY}[{ts}]{C.R}  {C.CYAN}{C.BOLD}›{C.R}  ").strip()
     except (EOFError, KeyboardInterrupt):
         return "exit"
 
 
-# ── Shutdown ──────────────────────────────────────────────────────────────────
-def shutdown() -> None:
+# ── Help ───────────────────────────────────────────────────────────────────────
+def show_help():
+    blank(); div()
+    pl("commands", C.GOLD + C.BOLD)
     blank()
-    divider("═")
-    typewrite("  Shutting down Shifu …  Standing by.", colour=C.CYAN, delay=0.04)
-    time.sleep(0.4)
-    divider("═")
-    blank()
+    for cmd, desc in [
+        ("help / ?",     "this panel"),
+        ("clear / cls",  "clear screen"),
+        ("history",      "session history"),
+        ("exit / quit",  "shutdown"),
+        ("<message>",    "send to shifu"),
+    ]:
+        pl(f"  {C.CYAN}{cmd:<16}{C.R}{C.WHITE}{desc}", indent=2)
+    blank(); div(); blank()
+
+
+# ── History ────────────────────────────────────────────────────────────────────
+_history: list[dict] = []
+
+def show_history():
+    if not _history:
+        pl("no queries yet.", C.GREY); return
+    blank(); div()
+    pl("history", C.GOLD + C.BOLD); blank()
+    for i, e in enumerate(_history, 1):
+        q = e["q"][:72] + ("…" if len(e["q"]) > 72 else "")
+        pl(f"  [{i:02d}]  {C.GREY}{e['t']}{C.R}  {C.WHITE}{q}", indent=2)
+    blank(); div(); blank()
+
+
+# ── Shutdown ───────────────────────────────────────────────────────────────────
+def shutdown():
+    blank(); div("═")
+    pl("shutting down …", C.CYAN)
+    div("═"); blank()
     sys.exit(0)
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
-def main() -> None:
-    boot_sequence()
+# ── Main ───────────────────────────────────────────────────────────────────────
+def main():
+    boot()
 
-    # Lazy-load the crew
-    spin = Spinner("LOADING CREW").start()
-    crew_instance, err = load_crew()
-    spin.stop()
-
+    # Load crew quietly
+    crew_inst, err = load_crew()
     if err:
-        print_line(f"⚠  {err}", C.ERR)
-        print_line("   Shifu will still run but agent queries won't work.", C.GREY)
-        blank()
-        crew_instance = None
+        pl(f"⚠  crew load failed: {err}", C.RED + C.BOLD)
+        pl("   queries won't work until crew.py is fixed.", C.GREY)
     else:
-        print_line("✓  Crew loaded successfully.", C.OK)
-        blank()
+        pl("✓  ready.", C.GREEN + C.BOLD)
+    blank()
 
     while True:
         try:
-            user_input = get_input()
+            raw = get_input()
         except KeyboardInterrupt:
-            blank()
-            shutdown()
+            blank(); shutdown()
 
-        if not user_input:
-            continue
+        if not raw: continue
+        cmd = raw.lower()
 
-        lower = user_input.lower()
-
-        # ── Built-in commands ──────────────────────────────────────────────
-        if lower in ("exit", "quit", "q"):
-            shutdown()
-
-        elif lower in ("help", "?", "h"):
-            show_help()
-            continue
-
-        elif lower in ("clear", "cls"):
-            os.system("cls" if os.name == "nt" else "clear")
-            boot_sequence()
-            continue
-
-        elif lower == "history":
-            show_history()
-            continue
-
-        elif lower == "status":
-            show_status(crew_instance is not None)
-            continue
-
-        # ── Agent query ────────────────────────────────────────────────────
+        if cmd in ("exit", "quit", "q"):          shutdown()
+        elif cmd in ("help", "?", "h"):           show_help()
+        elif cmd in ("clear", "cls"):             boot()
+        elif cmd == "history":                    show_history()
         else:
-            if crew_instance is None:
-                print_line("⚠  No crew loaded. Check that crew.py is in the current directory.", C.ERR)
-                blank()
-                continue
-
-            # Classify the route before dispatching
-            try:
-                from crew import classify_route
-                route = classify_route(user_input)
-            except Exception:
-                route = "CODE"  # fallback to full pipeline
+            if crew_inst is None:
+                pl("⚠  no crew loaded.", C.RED); blank(); continue
 
             blank()
-            print_line(f"Routing  →  {route}", C.SYS)
-            blank()
+            real_stdout   = sys.stdout
+            real_stderr   = sys.stderr
+            spinner_stop  = threading.Event()
+            t0            = time.time()
+            action        = ActionStream(t0, real_stdout)
 
-            spinner = Spinner().start()
-            t_start = time.time()
+            def _idle_dot():
+                chars = itertools.cycle(["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"])
+                while not spinner_stop.is_set():
+                    real_stdout.write(f"\r  {C.GREY}{next(chars)}{C.R}  ")
+                    real_stdout.flush()
+                    time.sleep(0.09)
+                real_stdout.write("\r" + " " * 24 + "\r")
+                real_stdout.flush()
 
+            dot_thread = threading.Thread(target=_idle_dot, daemon=True)
+            dot_thread.start()
+
+            # Redirect — crew output goes to ActionStream, render uses real_stdout
+            sys.stdout = action
+            sys.stderr = action
             try:
-                # Suppress CrewAI verbose output during execution
-                _real_stdout = sys.stdout
-                _real_stderr = sys.stderr
-                sys.stdout = io.StringIO()
-                sys.stderr = io.StringIO()
-
-                try:
-                    result, route = crew_instance.route_and_run(
-                        user_input=user_input,
-                        playground_dir=PLAYGROUND_DIR,
-                    )
-                finally:
-                    # Restore stdout/stderr no matter what
-                    sys.stdout = _real_stdout
-                    sys.stderr = _real_stderr
-
-                elapsed = time.time() - t_start
-                spinner.stop()
-
-                history.append({
-                    "time":  datetime.now().strftime("%H:%M:%S"),
-                    "query": user_input,
-                })
-
-                render_response(result, elapsed, route)
-
+                result  = crew_inst.crew().kickoff(
+                    inputs={
+                        "user_input":     raw,
+                        "playground_dir": PLAYGROUND_DIR,
+                    }
+                )
+                elapsed = time.time() - t0
             except KeyboardInterrupt:
-                sys.stdout = _real_stdout if '_real_stdout' in dir() else sys.__stdout__
-                sys.stderr = _real_stderr if '_real_stderr' in dir() else sys.__stderr__
-                spinner.stop()
-                blank()
-                print_line("  Query interrupted by user.", C.GREY)
-                blank()
-
+                sys.stdout = real_stdout; sys.stderr = real_stderr
+                spinner_stop.set(); dot_thread.join()
+                pl("  interrupted.", C.GREY); blank(); continue
             except Exception as exc:
-                sys.stdout = _real_stdout if '_real_stdout' in dir() else sys.__stdout__
-                sys.stderr = _real_stderr if '_real_stderr' in dir() else sys.__stderr__
-                elapsed = time.time() - t_start
-                spinner.stop()
-                blank()
-                print_line(f"  ERROR  ({elapsed:.1f}s):  {exc}", C.ERR)
-                blank()
+                sys.stdout = real_stdout; sys.stderr = real_stderr
+                elapsed = time.time() - t0
+                spinner_stop.set(); dot_thread.join()
+                pl(f"  error ({elapsed:.1f}s):", C.RED + C.BOLD)
+                pl(f"  {exc}", C.RED); blank(); continue
+            finally:
+                sys.stdout = real_stdout
+                sys.stderr = real_stderr
+
+            spinner_stop.set()
+            dot_thread.join()
+
+            # Extract result text — CrewOutput can nest the answer in multiple places
+            answer = None
+            if result is not None:
+                for attr in ("raw", "output", "result", "final_output"):
+                    val = getattr(result, attr, None)
+                    if val and str(val).strip():
+                        answer = str(val).strip(); break
+                if answer is None:
+                    answer = str(result).strip() or None
+
+            if not answer:
+                pl("  ⚠  shifu returned an empty response.", C.GOLD)
+                pl(f"  raw result object: {repr(result)[:200]}", C.GREY)
+                blank(); continue
+
+            _history.append({"t": datetime.now().strftime("%H:%M:%S"), "q": raw})
+            render(answer, elapsed)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
