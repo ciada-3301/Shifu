@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔═══════════════════════════════════════════════╗
-║         S H I F U   T E R M I N A L          ║
+║         S H I F U   T E R M I N A L           ║
 ║         Powered by CrewAI + Ollama            ║
 ╚═══════════════════════════════════════════════╝
 
@@ -17,7 +17,8 @@ import itertools
 import textwrap
 import random
 from datetime import datetime
-from tools.terminal_tool import PLAYGROUND_DIR
+PLAYGROUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Playground")
+os.makedirs(PLAYGROUND_DIR, exist_ok=True)
 
 # ── Colour palette (ANSI) ───────────────────────────────────────────────────
 class C:
