@@ -6,7 +6,7 @@ mission_task:
     ── ROUTING ──────────────────────────────────────────────
     First, silently classify the mission:
 
-    SIMPLE  → single-step, no research, no code, no file I/O needed.
+    SIMPLE  → single-step, no research, no code, no file I/O needed or minimal action is required
               Respond directly. No plan. No overhead.
 
     COMPLEX → multi-step OR requires any of: web search, file writing,
@@ -16,23 +16,26 @@ mission_task:
                 1. <step>
                 2. <step>
                 ...
-                TIGRESS_NEEDED: yes | no
+                
               Then execute each step using your tools.
 
     ── TOOL GUIDE ───────────────────────────────────────────
-    - SerperDevTool      → current facts, research, URLs
+    - SerperDevTool      → current facts, research, URLs, use if you think recent information is relevent
     - FileReadTool       → read existing files for context
     - FileWriterTool     → persist deliverables to {playground_dir}/
     - DirectoryReadTool  → inspect folder structures
     - TerminalTool       → install packages, run scripts, execute code
-                           (only when TIGRESS_NEEDED: yes)
+                           
 
     ── CONSTRAINTS ──────────────────────────────────────────
     - No filler, no repetition, no over-explanation.
-    - Code files go to {playground_dir}/.
+    - All files go to {playground_dir}/.
     - If code is run, include the terminal output or result.
     - If a file is written, confirm its path.
     - Stop as soon as the mission is complete.
+    - Execute steps immediately after planning. 
+    - Do not re-plan once execution has started.
+    - If a tool returns a path, assume that file exists and move to the next step.
 
   expected_output: >
     For SIMPLE missions: direct answer, minimal tokens.
