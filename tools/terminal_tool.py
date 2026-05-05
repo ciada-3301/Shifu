@@ -6,9 +6,7 @@ from crewai.tools import BaseTool
 
 
 # ── Playground sandbox path ───────────────────────────────────────────────────
-PLAYGROUND_DIR = r"C:\Users\arkad\OneDrive\Documents\Codes\Shifu\Playground"
-
-# Ensure the directory exists
+PLAYGROUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Playground")
 os.makedirs(PLAYGROUND_DIR, exist_ok=True)
 
 

@@ -66,7 +66,7 @@ class ShifuAssistantCrew:
             verbose=True,
             allow_delegation=False,
             max_iter=5,
-            memory=True,
+            memory=False,
         )
 
     @agent
@@ -82,7 +82,7 @@ class ShifuAssistantCrew:
             verbose=True,
             allow_delegation=False,
             max_iter=8,
-            memory=True,
+            memory=False,
         )
 
     @agent
@@ -101,7 +101,7 @@ class ShifuAssistantCrew:
             allow_code_execution=True,
             code_execution_mode="safe",
             max_iter=15,
-            memory=True,
+            memory=False,
         )
 
     # ── Tasks ─────────────────────────────────────────────────────────────────
@@ -187,7 +187,7 @@ class ShifuAssistantCrew:
             process=Process.hierarchical,
             manager_llm=shifu_llm,
             verbose=True,
-            memory=True,
+            memory=False,
             planning=True,
             planning_llm=shifu_llm,
             max_rpm=20,

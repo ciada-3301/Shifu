@@ -17,6 +17,7 @@ import itertools
 import textwrap
 import random
 from datetime import datetime
+from tools.terminal_tool import PLAYGROUND_DIR
 
 # ── Colour palette (ANSI) ───────────────────────────────────────────────────
 class C:
@@ -635,14 +636,16 @@ def main() -> None:
             t_start = time.time()
 
             try:
-                result = crew_instance.crew().kickoff(inputs={
-                    "user_input":        user_input,
-                    "playground_dir":    r"C:\Users\arkad\OneDrive\Documents\Codes\Shifu\Playground",
-                    "planning_output":   "",
-                    "research_output":   "",
-                    "filesystem_output": "",
-                    "execution_output":  "",
-                })
+                result = crew_instance.crew().kickoff(
+                    inputs={
+                        "user_input":        user_input,
+                        "playground_dir":    PLAYGROUND_DIR,
+                        "planning_output":   "",
+                        "research_output":   "",
+                        "filesystem_output": "",
+                        "execution_output":  "",
+                    }
+                    )
                 elapsed = time.time() - t_start
                 spinner.stop()
 
