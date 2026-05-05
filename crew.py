@@ -31,19 +31,19 @@ from crewai_tools import (
     DirectoryReadTool,
 )
 
-from tools.terminal_tool import TerminalTool, PLAYGROUND_DIR
+from tools.terminal_tool import TerminalTool
 
 load_dotenv()
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 shifu_llm = LLM(
-    model="ollama/gemma4:31b",
+    model="gpt-oss:120b-cloud",
     base_url="https://ollama.com",
     api_key=os.getenv("OLLAMA_API_KEY_SHIFU"),
 )
 
 tigress_llm = LLM(
-    model="ollama/qwen3-coder-next:cloud",
+    model="ollama/gpt-oss:120b-cloud",
     base_url="https://ollama.com",
     api_key=os.getenv("OLLAMA_API_KEY_TIGRESS"),
 )
