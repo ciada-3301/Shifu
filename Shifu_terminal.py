@@ -635,7 +635,14 @@ def main() -> None:
             t_start = time.time()
 
             try:
-                result = crew_instance.crew().kickoff(inputs={"user_input": user_input})
+                result = crew_instance.crew().kickoff(inputs={
+                    "user_input":        user_input,
+                    "playground_dir":    r"C:\Users\arkad\OneDrive\Documents\Codes\Shifu\Playground",
+                    "planning_output":   "",
+                    "research_output":   "",
+                    "filesystem_output": "",
+                    "execution_output":  "",
+                })
                 elapsed = time.time() - t_start
                 spinner.stop()
 
