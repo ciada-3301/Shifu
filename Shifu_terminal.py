@@ -4,7 +4,7 @@
 ║   S H I F U  T E R M I N A L ║
 ╚══════════════════════════════╝
 """
-
+from nosier import  _patch_rich
 import sys, os, time, threading, itertools, textwrap, re, random
 from datetime import datetime
 
@@ -379,6 +379,7 @@ def main():
             sys.stdout = action
             sys.stderr = action
             try:
+                _patch_rich() 
                 result  = crew_inst.crew().kickoff(
                     inputs={
                         "user_input":     raw,

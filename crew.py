@@ -19,19 +19,19 @@ load_dotenv()
 os.environ["OPENAI_API_KEY"] = "NA" 
 PLAYGROUND_DIR = Path("playground")
 PLAYGROUND_DIR.mkdir(exist_ok=True)
-
+is_verbose = False
 # ── LLMs ─────────────────────────────────────────────────────────────────────
 # planner_llm  → reasoning, classification, review  (heavier, used sparingly)
 # executor_llm → action, writing, code, search      (default workhorse)
 
 planner_llm = LLM(
-    model="ollama/gemma4:31b-cloud",
+    model="ollama/gpt-oss:120b-cloud",
     base_url="https://ollama.com",
     api_key=os.getenv("OLLAMA_API_KEY_PLANNER"),
 )
 
 executor_llm = LLM(
-    model="ollama/gemma4:31b-cloud",
+    model="ollama/gpt-oss:120b-cloud",
     base_url="https://ollama.com",
     api_key=os.getenv("OLLAMA_API_KEY_EXECUTOR"),
 )
@@ -55,7 +55,7 @@ class ShifuCrew:
                 TerminalTool(),
             ],
             llm=executor_llm,
-            verbose=False,
+            verbose=is_verbose,
             allow_delegation=False,
             allow_code_execution=True,
             code_execution_mode="safe",
@@ -81,7 +81,7 @@ class ShifuCrew:
             # to invoke the planner_llm for a pre-flight plan.
             planning=True,
             planning_llm=planner_llm,
-            verbose=False,
+            verbose=is_verbose,
             memory=False,
             max_rpm=20,
             share_crew=False,
