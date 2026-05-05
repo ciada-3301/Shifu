@@ -1,70 +1,42 @@
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Shifu Task Definitions — lean and direct.
-# Context chaining (context= in crew.py) passes previous task
-# outputs automatically. No need for template variables.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-research_task:
+mission_task:
   description: >
-    Research the following request using web search:
+    User mission: {user_input}
+    Playground dir: {playground_dir}
 
-    USER REQUEST: {user_input}
+    ── ROUTING ──────────────────────────────────────────────
+    First, silently classify the mission:
 
-    Instructions:
-    - Run targeted, varied web searches (not the same phrase rephrased)
-    - Every finding must have a source URL — no source means no finding
-    - Prioritise official docs, GitHub repos, and primary sources
-    - Extract concrete facts: dates, versions, code snippets, measurements
-    - If you can't find something after 3 different queries, mark it UNRESOLVED
-    - Keep output concise and structured for the next agent to act on
+    SIMPLE  → single-step, no research, no code, no file I/O needed.
+              Respond directly. No plan. No overhead.
+
+    COMPLEX → multi-step OR requires any of: web search, file writing,
+              code execution, directory inspection, multi-part research.
+              Before acting, output a tight plan:
+                PLAN
+                1. <step>
+                2. <step>
+                ...
+                TIGRESS_NEEDED: yes | no
+              Then execute each step using your tools.
+
+    ── TOOL GUIDE ───────────────────────────────────────────
+    - SerperDevTool      → current facts, research, URLs
+    - FileReadTool       → read existing files for context
+    - FileWriterTool     → persist deliverables to {playground_dir}/
+    - DirectoryReadTool  → inspect folder structures
+    - TerminalTool       → install packages, run scripts, execute code
+                           (only when TIGRESS_NEEDED: yes)
+
+    ── CONSTRAINTS ──────────────────────────────────────────
+    - No filler, no repetition, no over-explanation.
+    - Code files go to {playground_dir}/.
+    - If code is run, include the terminal output or result.
+    - If a file is written, confirm its path.
+    - Stop as soon as the mission is complete.
+
   expected_output: >
-    A concise research report with verified findings and source URLs.
-    Include an UNRESOLVED section for anything that couldn't be confirmed.
-
-filesystem_task:
-  description: >
-    Handle file operations for this request:
-
-    USER REQUEST: {user_input}
-    PLAYGROUND: {playground_dir}
-
-    If this is a CONTENT/WRITING task (no code execution needed):
-    - Take the research context and synthesise it into polished content
-    - Write the final deliverable to the playground directory
-    - Read the file back to verify it was written correctly
-    - Report the confirmed file path
-
-    If this is a CODING task (code will be executed by Tigress):
-    - Read any relevant existing files
-    - Map the directory structure
-    - Write scaffolding files (requirements, configs, stubs)
-    - Prepare a brief context summary for Tigress
-
-    Always verify file writes by reading back. Never report a file
-    as saved without confirming it exists.
-  expected_output: >
-    A brief report of file operations performed, files written with
-    confirmed paths, and verification status. If preparing for code
-    execution, include a context summary for the next agent.
-
-execution_task:
-  description: >
-    Execute code for this request:
-
-    USER REQUEST: {user_input}
-    PLAYGROUND: {playground_dir}
-
-    Follow this loop:
-    1. UNDERSTAND — Read the context from previous steps fully
-    2. INSTALL — Install required packages, verify each install
-    3. WRITE — Write minimal code to test core logic (write to file first)
-    4. RUN — Execute via Terminal tool, read ALL stdout and stderr
-    5. ASSESS — Compare output against what the user asked for
-    6. FIX OR COMPLETE — Error? Diagnose, fix, go to step 4. Success? Done.
-
-    All work goes inside {playground_dir}. No exceptions.
-    "No error" does not mean "correct" — verify the output is right.
-  expected_output: >
-    A brief execution report: what was built, commands run, final output,
-    and whether the user's request was fulfilled. Include file paths for
-    any code or output produced.
+    For SIMPLE missions: direct answer, minimal tokens.
+    For COMPLEX missions:
+      - The plan (if produced)
+      - Tool outputs / file paths / code results as needed
+      - A concise final summary of what was accomplished
