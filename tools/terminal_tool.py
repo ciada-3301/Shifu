@@ -5,8 +5,10 @@ from pydantic import BaseModel, Field
 from crewai.tools import BaseTool
 
 
-# ── Playground sandbox path ───────────────────────────────────────────────────
-PLAYGROUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Playground")
+# ── Playground sandbox path (project root / Playground) ───────────────────────
+# Resolve relative to project root, not relative to tools/ directory.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PLAYGROUND_DIR = os.path.join(_PROJECT_ROOT, "Playground")
 os.makedirs(PLAYGROUND_DIR, exist_ok=True)
 
 
@@ -16,7 +18,7 @@ class TerminalInput(BaseModel):
         ...,
         description=(
             "The shell command to execute. "
-            "Working directory is always the playground/ sandbox. "
+            "Working directory is always the Playground/ sandbox. "
             "Use 'pip install <pkg>' to install libraries on the fly. "
             "Examples: 'ls -la', 'pip install numpy', 'python script.py'"
         )
@@ -27,10 +29,10 @@ class TerminalInput(BaseModel):
 class TerminalTool(BaseTool):
     name: str = "Terminal"
     description: str = (
-        "Execute any shell / terminal command inside the playground/ sandbox directory. "
+        "Execute any shell / terminal command inside the Playground/ sandbox directory. "
         "Use this to run scripts, install Python packages with pip, create files, "
         "inspect the environment, or do anything you'd do in a real terminal. "
-        "All commands are sandboxed to playground/ for safety."
+        "All commands are sandboxed to Playground/ for safety."
     )
     args_schema: type[BaseModel] = TerminalInput
 
