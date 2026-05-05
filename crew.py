@@ -1,25 +1,22 @@
 """
-crew.py — Shifu's Kung Fu AI Crew
+crew.py — Shifu's Optimized AI Crew
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Smart routing — not every query needs the full pipeline:
+  DIRECT   → Simple Q&A, conversational      → Single LLM call
+  RESEARCH → Needs web search + write-up      → Viper → Po
+  FILE_OPS → File read/write/organize         → Po only
+  CODE     → Write + execute code             → Viper → Po → Tigress
+
 Agents:
-  Shifu   — Hierarchical manager / planner / reviewer (no direct tools)
-  Viper   — Researcher (web search only)
-  Po      — Filesystem expert + content writer for non-coding missions
-  Tigress — Coder / executor (only engages when code is actually needed)
-
-Mission Types handled:
-  RESEARCH_AND_WRITE  → Viper researches, Po writes the file. Tigress stands down.
-  CODE_AND_EXECUTE    → Full pipeline: Viper → Po (scaffold) → Tigress (execute)
-  FILESYSTEM_ONLY     → Po only. No research, no code.
-  MIXED               → Full pipeline.
-
-Routing is driven by Shifu's planning_task output. Every downstream task
-reads TIGRESS REQUIRED from the plan and self-scopes accordingly.
+  Viper   — Web researcher (search only)
+  Po      — Filesystem + content writer
+  Tigress — Code executor (only when code is needed)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import os
-from textwrap import dedent
+import re
 from dotenv import load_dotenv
 
 from crewai import Agent, Crew, Task, Process, LLM
@@ -35,9 +32,13 @@ from tools.terminal_tool import TerminalTool
 
 load_dotenv()
 
+# ── Playground ────────────────────────────────────────────────────────────────
+PLAYGROUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Playground")
+os.makedirs(PLAYGROUND_DIR, exist_ok=True)
+
 # ── LLM ───────────────────────────────────────────────────────────────────────
 shifu_llm = LLM(
-    model="gpt-oss:120b-cloud",
+    model="ollama/gpt-oss:120b-cloud",
     base_url="https://ollama.com",
     api_key=os.getenv("OLLAMA_API_KEY_SHIFU"),
 )
@@ -47,6 +48,52 @@ tigress_llm = LLM(
     base_url="https://ollama.com",
     api_key=os.getenv("OLLAMA_API_KEY_TIGRESS"),
 )
+
+
+# ── Route Classification ─────────────────────────────────────────────────────
+# Keywords/patterns that signal each route type.
+
+_CODE_SIGNALS = re.compile(
+    r'\b(write\s+(a\s+)?(python|script|code|program|function|class|app|application|bot|cli|tool))'
+    r'|\b(build|create|develop|implement|code|program|automate|scrape|crawl|parse|execute|run|compile|deploy)\b'
+    r'|\b(pip\s+install|import\s+\w|def\s+\w|\.py|javascript|html|css|sql|api|endpoint|server|flask|django|fastapi)\b',
+    re.IGNORECASE
+)
+
+_RESEARCH_SIGNALS = re.compile(
+    r'\b(search|research|find\s+(out|info|information|details|about))'
+    r'|\b(look\s+up|what\s+is|who\s+is|when\s+did|where\s+is|how\s+does|how\s+do|explain|latest|current|recent|news)\b'
+    r'|\b(compare|difference\s+between|vs\.?|versus|pros\s+and\s+cons)\b',
+    re.IGNORECASE
+)
+
+_FILE_SIGNALS = re.compile(
+    r'\b(read|open|list|show|display|cat|view|browse|tree|ls|dir)\s+(file|folder|directory|path)'
+    r'|\b(write\s+to\s+file|save\s+(to|as|into)|create\s+(a\s+)?file|organize|move|rename|copy|delete)\b'
+    r'|\b(summarise|summarize)\s+(the\s+)?(files?|folder|directory|content)\b',
+    re.IGNORECASE
+)
+
+
+def classify_route(user_input: str) -> str:
+    """
+    Classify user input into a route type.
+    Priority: CODE > RESEARCH+FILE > FILE > RESEARCH > DIRECT
+    """
+    text = user_input.strip()
+    has_code = bool(_CODE_SIGNALS.search(text))
+    has_research = bool(_RESEARCH_SIGNALS.search(text))
+    has_file = bool(_FILE_SIGNALS.search(text))
+
+    if has_code:
+        return "CODE"
+    if has_research and has_file:
+        return "RESEARCH"   # Research that results in a file — Viper → Po
+    if has_file:
+        return "FILE_OPS"
+    if has_research:
+        return "RESEARCH"
+    return "DIRECT"
 
 
 # ── Crew ──────────────────────────────────────────────────────────────────────
@@ -61,9 +108,9 @@ class ShifuAssistantCrew:
     def viper(self) -> Agent:
         return Agent(
             config=self.agents_config["viper"],
-            tools=[SerperDevTool()],        # Web search only — no PDFs, no files
+            tools=[SerperDevTool()],
             llm=shifu_llm,
-            verbose=True,
+            verbose=False,
             allow_delegation=False,
             max_iter=5,
             memory=False,
@@ -74,12 +121,12 @@ class ShifuAssistantCrew:
         return Agent(
             config=self.agents_config["po"],
             tools=[
-                FileReadTool(),             # Read existing files for context
-                FileWriterTool(),           # Write final deliverables or scaffolding
-                DirectoryReadTool(),        # Map directory structures
+                FileReadTool(),
+                FileWriterTool(),
+                DirectoryReadTool(),
             ],
             llm=shifu_llm,
-            verbose=True,
+            verbose=False,
             allow_delegation=False,
             max_iter=8,
             memory=False,
@@ -90,13 +137,13 @@ class ShifuAssistantCrew:
         return Agent(
             config=self.agents_config["tigress"],
             tools=[
-                TerminalTool(),             # Sandboxed terminal — pip, run scripts
-                FileWriterTool(),           # Write code files to playground/
-                FileReadTool(),             # Read output files and logs
-                DirectoryReadTool(),        # Inspect playground/ structure
+                TerminalTool(),
+                FileWriterTool(),
+                FileReadTool(),
+                DirectoryReadTool(),
             ],
             llm=tigress_llm,
-            verbose=True,
+            verbose=False,
             allow_delegation=False,
             allow_code_execution=True,
             code_execution_mode="safe",
@@ -107,116 +154,132 @@ class ShifuAssistantCrew:
     # ── Tasks ─────────────────────────────────────────────────────────────────
 
     @task
-    def planning_task(self) -> Task:
-        """
-        Shifu classifies the mission type and builds an execution plan.
-        The TIGRESS REQUIRED field in the output is the routing signal
-        that all downstream tasks read to self-scope.
-        """
-        return Task(
-            config=self.tasks_config["planning_task"],
-            agent=None,  # Handled by Shifu (manager) in hierarchical mode
-        )
-
-    @task
     def research_task(self) -> Task:
-        """
-        Viper's research step. Self-scopes: outputs a STATUS-only block
-        if no [Viper] steps appear in Shifu's plan.
-        """
         return Task(
             config=self.tasks_config["research_task"],
             agent=self.viper(),
-            context=[self.planning_task()],
         )
 
     @task
     def filesystem_task(self) -> Task:
-        """
-        Po's task. In RESEARCH_AND_WRITE missions Po is the final executor
-        and writes the deliverable himself. In coding missions Po scaffolds
-        for Tigress. The task description encodes both modes.
-        """
         return Task(
             config=self.tasks_config["filesystem_task"],
             agent=self.po(),
-            context=[self.planning_task(), self.research_task()],
+            context=[self.research_task()],
         )
 
     @task
     def execution_task(self) -> Task:
-        """
-        Tigress's task. Reads TIGRESS REQUIRED from the plan. If it's 'no',
-        she outputs a one-liner and stops — no code, no terminal commands.
-        If it's 'yes', she runs the full Antigravity loop.
-        """
         return Task(
             config=self.tasks_config["execution_task"],
             agent=self.tigress(),
             context=[
-                self.planning_task(),
                 self.research_task(),
                 self.filesystem_task(),
             ],
         )
 
-    @task
-    def review_task(self) -> Task:
-        """
-        Shifu's final review. Audits against SUCCESS CRITERIA, routes
-        the correct quality checks based on MISSION TYPE, and either
-        accepts the output or issues targeted feedback.
-        """
-        return Task(
-            config=self.tasks_config["review_task"],
-            agent=None,  # Shifu (manager)
-            context=[
-                self.planning_task(),
-                self.filesystem_task(),
-                self.execution_task(),
-            ],
+    # ── Crew Builders (one per route) ─────────────────────────────────────────
+
+    def _build_crew(self, agents: list, tasks: list) -> Crew:
+        """Build a crew with the given agents and tasks."""
+        return Crew(
+            agents=agents,
+            tasks=tasks,
+            process=Process.sequential,
+            verbose=False,
+            memory=False,
+            share_crew=False,
         )
 
-    # ── Crew ──────────────────────────────────────────────────────────────────
+    def direct_crew(self) -> Crew:
+        """Single agent for simple Q&A — Po answers directly."""
+        direct_task = Task(
+            description=(
+                "Answer the following user request directly and concisely. "
+                "Do not use any tools unless absolutely necessary. "
+                "Give a clear, helpful, well-formatted response.\n\n"
+                "USER REQUEST: {user_input}"
+            ),
+            expected_output="A clear, helpful, well-formatted answer to the user's question.",
+            agent=self.po(),
+        )
+        return self._build_crew([self.po()], [direct_task])
+
+    def research_crew(self) -> Crew:
+        """Viper researches, Po writes the output."""
+        return self._build_crew(
+            [self.viper(), self.po()],
+            [self.research_task(), self.filesystem_task()],
+        )
+
+    def fileops_crew(self) -> Crew:
+        """Po handles file operations solo."""
+        return self._build_crew(
+            [self.po()],
+            [self.filesystem_task()],
+        )
+
+    def code_crew(self) -> Crew:
+        """Full pipeline: Viper → Po → Tigress."""
+        return self._build_crew(
+            [self.viper(), self.po(), self.tigress()],
+            [self.research_task(), self.filesystem_task(), self.execution_task()],
+        )
+
+    # ── Default crew (backwards compatibility) ────────────────────────────────
 
     @crew
     def crew(self) -> Crew:
-        return Crew(
-            agents=self.agents,
-            tasks=self.tasks,
-            process=Process.hierarchical,
-            manager_llm=shifu_llm,
-            verbose=True,
-            memory=False,
-            planning=True,
-            planning_llm=shifu_llm,
-            max_rpm=20,
-            share_crew=False,
+        """Default crew — uses full pipeline. Use route_and_run() for smart routing."""
+        return self._build_crew(
+            [self.viper(), self.po(), self.tigress()],
+            [self.research_task(), self.filesystem_task(), self.execution_task()],
         )
+
+    # ── Smart Router ──────────────────────────────────────────────────────────
+
+    def route_and_run(self, user_input: str, playground_dir: str = None):
+        """
+        Classify the user's request and run only the agents needed.
+        Returns (result, route_type, crew_used).
+        """
+        if playground_dir is None:
+            playground_dir = PLAYGROUND_DIR
+
+        route = classify_route(user_input)
+        inputs = {
+            "user_input": user_input,
+            "playground_dir": playground_dir,
+        }
+
+        if route == "DIRECT":
+            crew_obj = self.direct_crew()
+        elif route == "RESEARCH":
+            crew_obj = self.research_crew()
+        elif route == "FILE_OPS":
+            crew_obj = self.fileops_crew()
+        else:  # CODE
+            crew_obj = self.code_crew()
+
+        result = crew_obj.kickoff(inputs=inputs)
+        return result, route
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print(f"\n🐾  Playground sandbox : {PLAYGROUND_DIR}")
     print("━" * 60)
-    prompt = input("Mission for the Five ..> ").strip()
+    prompt = input("Mission for the crew ..> ").strip()
 
     if not prompt:
         print("No mission given. Shifu rests.")
     else:
-        result = ShifuAssistantCrew().crew().kickoff(
-            inputs={
-                "user_input":        prompt,
-                "playground_dir":    str(PLAYGROUND_DIR),
-                # Populated at runtime by task outputs:
-                "planning_output":   "",
-                "research_output":   "",
-                "filesystem_output": "",
-                "execution_output":  "",
-            }
-        )
-        print("\n" + "━" * 60)
-        print("  MISSION COMPLETE — SHIFU'S FINAL REPORT")
-        print("━" * 60)
+        crew_instance = ShifuAssistantCrew()
+        result, route = crew_instance.route_and_run(prompt)
+        print(f"\n{'━' * 60}")
+        print(f"  ROUTE: {route}")
+        print(f"  MISSION COMPLETE — SHIFU'S REPORT")
+        print(f"{'━' * 60}")
         print(result.raw)
         print("━" * 60 + "\n")
