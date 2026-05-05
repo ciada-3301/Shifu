@@ -1,419 +1,70 @@
-planning_task:
-  description: >
-    You are Master Shifu. A mission has arrived. Before anyone moves, you plan.
-
-    USER REQUEST:
-    {user_input}
-
-    PLAYGROUND SANDBOX: {playground_dir}
-
-    Your first and most important decision is MISSION TYPE. Get this wrong
-    and the whole crew wastes cycles doing the wrong kind of work.
-
-    ─────────────────────────────────────────────────────────────
-    MISSION TYPE DECISION TREE
-    ─────────────────────────────────────────────────────────────
-
-    RESEARCH_AND_WRITE
-      The user wants information gathered and written to a file or
-      returned as structured content. No code needs to run.
-      Examples: "research X and write a report", "summarise Y into a .txt",
-                "find information about Z and save it to /some/path"
-      Agents needed: Viper (research) → Po (write file)
-      Tigress: NOT NEEDED
-
-    CODE_AND_EXECUTE
-      The user wants a program written, a script run, a package used,
-      data processed programmatically, or any form of code execution.
-      Examples: "write a Python script that...", "scrape this site",
-                "build a CLI tool", "process this CSV", "automate X"
-      Agents needed: Viper (if research needed) → Po (scaffold) → Tigress (execute)
-      Tigress: REQUIRED
-
-    FILESYSTEM_ONLY
-      The user wants files read, moved, organised, or summarised —
-      no research needed, no code to run.
-      Examples: "summarise the files in /this/dir", "read config.yaml and explain it"
-      Agents needed: Po only
-      Tigress: NOT NEEDED
-
-    MIXED
-      The mission has both research/writing AND coding components.
-      Agents needed: Viper → Po → Tigress (full pipeline)
-
-    ─────────────────────────────────────────────────────────────
-
-    PLANNING RULES:
-    - Assign each step to exactly one of: [Viper], [Po], [Tigress]
-    - Only assign [Tigress] steps if the mission type requires code execution
-    - If mission type is RESEARCH_AND_WRITE: Po writes the final file — Tigress
-      gets zero steps and should NOT appear in the STEPS list
-    - For file output paths: use the exact path the user specified if they gave
-      one. If no path was given, default to {playground_dir}/<sensible_filename>
-    - Define SUCCESS CRITERIA that are objectively verifiable:
-        ✓ Good: "File exists at /this/path and contains sections on X, Y, Z"
-        ✗ Bad:  "The research is thorough"
-
-    OUTPUT FORMAT — use exactly:
-
-    ---PLAN START---
-    MISSION TYPE: RESEARCH_AND_WRITE | CODE_AND_EXECUTE | FILESYSTEM_ONLY | MIXED
-
-    GOAL:
-      <single sentence describing the end state>
-
-    OUTPUT TARGET:
-      <exact file path or directory where final output lands, if applicable>
-
-    ASSUMPTIONS:
-      - <assumption or "none">
-
-    STEPS:
-      1. [Agent] <precise description>
-      2. [Agent] <precise description>
-      ...
-
-    TIGRESS REQUIRED: yes | no
-    REASON: <one sentence justifying the tigress decision>
-
-    DEPENDENCIES:
-      - Step N requires output of Step M: <reason — or "none">
-
-    SUCCESS CRITERIA:
-      - <objectively verifiable condition>
-
-    ESTIMATED COMPLEXITY: low | medium | high
-    ---PLAN END---
-  expected_output: >
-    A complete structured plan enclosed between ---PLAN START--- and ---PLAN END---
-    markers. Must contain all sections including MISSION TYPE, GOAL, OUTPUT TARGET,
-    ASSUMPTIONS, STEPS (each prefixed with [AgentName]), TIGRESS REQUIRED with
-    REASON, DEPENDENCIES, SUCCESS CRITERIA, and ESTIMATED COMPLEXITY.
-    If mission type is RESEARCH_AND_WRITE or FILESYSTEM_ONLY, no [Tigress] steps
-    should appear in the STEPS list.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Shifu Task Definitions — lean and direct.
+# Context chaining (context= in crew.py) passes previous task
+# outputs automatically. No need for template variables.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 research_task:
   description: >
-    You are Viper. Shifu has issued a plan. Execute all steps assigned to [Viper].
+    Research the following request using web search:
 
-    SHIFU'S PLAN:
-    {planning_output}
+    USER REQUEST: {user_input}
 
-    ── SCOPE CHECK ───────────────────────────────────────────────
-    Read the STEPS list. If no steps are assigned to [Viper], output:
-      ---RESEARCH START---
-      STATUS: not required for this mission
-      ---RESEARCH END---
-    And stop. Do not invent research tasks that weren't assigned.
-    ──────────────────────────────────────────────────────────────
-
-    If [Viper] steps exist, execute them fully:
-
-    EXECUTION STANDARDS:
-    - Run targeted, varied web searches — not the same phrase rephrased
-    - For every finding, record the source URL. No source = no finding.
-    - Prioritise primary sources: official docs, GitHub repos, academic papers,
-      vendor announcements over aggregator blogs and forums
-    - Extract concrete artefacts: specific facts, dates, names, measurements,
-      code signatures, version numbers, known limitations
-    - If results are contradictory, note both versions and their sources
-    - If you cannot find something after 3 different query strategies, mark it
-      UNRESOLVED — document what you tried
-    - Web search ONLY. No PDF reading, no local file access, no code execution.
-    - This applies equally to all topics — technical and non-technical alike.
-      "Egyptian cats" gets the same rigour as "FastAPI authentication docs".
-
-    OUTPUT FORMAT — use exactly:
-
-    ---RESEARCH START---
-    QUERIES RUN:
-      - "<query>" → <one-line note on quality of results>
-
-    FINDINGS:
-      <topic or subtopic>:
-        - <specific finding> [source: <URL>]
-        - <specific finding> [source: <URL>]
-
-    KEY ARTEFACTS:
-      <extracted facts, figures, dates, code snippets, API shapes — or "none">
-
-    UNRESOLVED:
-      - <what you couldn't find> — tried: <queries attempted>
-      - <or "none">
-
-    HANDOFF NOTE:
-      Type of consumer: <Po (writing a file) | Tigress (writing code) | both>
-      <What the consumer needs to know from this research to do their job>
-    ---RESEARCH END---
+    Instructions:
+    - Run targeted, varied web searches (not the same phrase rephrased)
+    - Every finding must have a source URL — no source means no finding
+    - Prioritise official docs, GitHub repos, and primary sources
+    - Extract concrete facts: dates, versions, code snippets, measurements
+    - If you can't find something after 3 different queries, mark it UNRESOLVED
+    - Keep output concise and structured for the next agent to act on
   expected_output: >
-    A research report enclosed between ---RESEARCH START--- and ---RESEARCH END---
-    markers. If research was not needed, the STATUS line is sufficient. Otherwise,
-    must include QUERIES RUN, FINDINGS with verified source URLs, KEY ARTEFACTS,
-    UNRESOLVED items, and a HANDOFF NOTE directed at the correct downstream agent.
+    A concise research report with verified findings and source URLs.
+    Include an UNRESOLVED section for anything that couldn't be confirmed.
 
 filesystem_task:
   description: >
-    You are Po. Plan is set. Viper has researched. Now you act.
+    Handle file operations for this request:
 
-    SHIFU'S PLAN:
-    {planning_output}
+    USER REQUEST: {user_input}
+    PLAYGROUND: {playground_dir}
 
-    VIPER'S RESEARCH:
-    {research_output}
+    If this is a CONTENT/WRITING task (no code execution needed):
+    - Take the research context and synthesise it into polished content
+    - Write the final deliverable to the playground directory
+    - Read the file back to verify it was written correctly
+    - Report the confirmed file path
 
-    PLAYGROUND SANDBOX: {playground_dir}
+    If this is a CODING task (code will be executed by Tigress):
+    - Read any relevant existing files
+    - Map the directory structure
+    - Write scaffolding files (requirements, configs, stubs)
+    - Prepare a brief context summary for Tigress
 
-    ── DETERMINE YOUR MODE ───────────────────────────────────────
-    Read the MISSION TYPE and TIGRESS REQUIRED fields in Shifu's plan.
-
-    MODE A — CONTENT EXECUTOR (TIGRESS REQUIRED: no)
-      You are the final executor. Viper researched. You write the deliverable.
-      Steps:
-        1. Read Viper's research in full
-        2. Synthesise it into well-structured, polished written content
-        3. Create any missing directories in the OUTPUT TARGET path
-        4. Write the final file to the exact OUTPUT TARGET path from the plan
-        5. Read the file back to confirm it was written correctly
-        6. Report the confirmed file path and a content summary
-
-    MODE B — SCAFFOLD OFFICER (TIGRESS REQUIRED: yes)
-      Tigress will execute after you. Your job is to prepare her environment.
-      Steps:
-        1. Read all existing files the plan references
-        2. Map the directory structure
-        3. Write scaffolding files (requirements stubs, __init__.py, configs)
-        4. Produce a tight context brief for Tigress
-    ──────────────────────────────────────────────────────────────
-
-    CONTENT WRITING STANDARDS (Mode A):
-    - Write in clear, well-organised prose — use headers, sections, bullet
-      points where appropriate for the content type
-    - The content quality must be publication-ready — not a raw dump of
-      Viper's research notes, but a synthesised, readable document
-    - Always include a sources section at the end with Viper's URLs
-    - If the user specified a file format (.txt, .md, .json), honour it exactly
-    - After writing: READ THE FILE BACK. Confirm it exists and is not empty.
-    - If the directory doesn't exist, CREATE it first, then write the file.
-
-    FILESYSTEM STANDARDS (both modes):
-    - Never report a file as written without reading it back to verify
-    - Never silently skip a file the plan references
-    - Record every file operation performed
-
-    OUTPUT FORMAT — use exactly:
-
-    ---FILESYSTEM START---
-    MODE: CONTENT_EXECUTOR | SCAFFOLD_OFFICER
-
-    OPERATIONS PERFORMED:
-      1. <what you did>
-      2. <what you did>
-      ...
-
-    FILES WRITTEN:
-      <full path>: <brief description of contents>
-
-    VERIFICATION:
-      <filename> read back: confirmed <N> bytes / <N> lines — <pass | fail>
-
-    CONTEXT FOR TIGRESS:
-      (Mode B only — omit entirely in Mode A)
-      Environment: <Python version, venv, key env vars>
-      Playground path: {playground_dir}
-      Existing relevant code: <or "none">
-      Scaffolding written: <list or "none">
-      Do NOT touch: <protected paths or "none">
-
-    FINAL OUTPUT SUMMARY:
-      (Mode A) File delivered: <full confirmed path>
-               Content summary: <2-3 sentence description of what was written>
-      (Mode B) Handoff to Tigress: ready | not ready — <reason>
-    ---FILESYSTEM END---
+    Always verify file writes by reading back. Never report a file
+    as saved without confirming it exists.
   expected_output: >
-    A filesystem report enclosed between ---FILESYSTEM START--- and
-    ---FILESYSTEM END--- markers. Must declare MODE, list all OPERATIONS
-    PERFORMED, confirm every file written with a VERIFICATION read-back,
-    and end with a FINAL OUTPUT SUMMARY. In Mode A, the summary must include
-    the confirmed full file path. In Mode B, must include CONTEXT FOR TIGRESS.
+    A brief report of file operations performed, files written with
+    confirmed paths, and verification status. If preparing for code
+    execution, include a context summary for the next agent.
 
 execution_task:
   description: >
-    You are Tigress. Plan is set. Research is done. Filesystem is prepped.
+    Execute code for this request:
 
-    SHIFU'S PLAN:
-    {planning_output}
+    USER REQUEST: {user_input}
+    PLAYGROUND: {playground_dir}
 
-    VIPER'S RESEARCH:
-    {research_output}
-
-    PO'S FILESYSTEM CONTEXT:
-    {filesystem_output}
-
-    PLAYGROUND SANDBOX: {playground_dir}
-
-    ── SCOPE CHECK — READ THIS FIRST ─────────────────────────────
-    Check the TIGRESS REQUIRED field in Shifu's plan.
-
-    If TIGRESS REQUIRED: no —
-      Output exactly:
-        ---EXECUTION START---
-        STATUS: not required for this mission
-        REASON: <quote the reason from Shifu's plan>
-        ---EXECUTION END---
-      And stop. Do not write code. Do not run commands. Po has already
-      handled the output. Your involvement would be redundant and wasteful.
-
-    If TIGRESS REQUIRED: yes — proceed with full execution below.
-    ──────────────────────────────────────────────────────────────
-
-    YOUR EXECUTION PROTOCOL — the Antigravity Loop:
-
-    ╔══════════════════════════════════════════════════════╗
-    ║  PHASE 1 — UNDERSTAND                                ║
-    ║    Read the plan, research, and Po's brief fully.    ║
-    ║    Know what you're building before writing anything. ║
-    ╠══════════════════════════════════════════════════════╣
-    ║  PHASE 2 — INSTALL                                   ║
-    ║    Install required packages first.                  ║
-    ║    Verify each install before proceeding.            ║
-    ╠══════════════════════════════════════════════════════╣
-    ║  PHASE 3 — WRITE                                     ║
-    ║    Write minimum code to test core logic.            ║
-    ║    Write to file first — never run inline.           ║
-    ╠══════════════════════════════════════════════════════╣
-    ║  PHASE 4 — RUN                                       ║
-    ║    Execute via TerminalTool.                         ║
-    ║    Read ALL output — stdout AND stderr.              ║
-    ╠══════════════════════════════════════════════════════╣
-    ║  PHASE 5 — ASSESS                                    ║
-    ║    Compare output against SUCCESS CRITERIA.          ║
-    ║    "No error" ≠ "correct output". Be honest.        ║
-    ╠══════════════════════════════════════════════════════╣
-    ║  PHASE 6 — FIX OR COMPLETE                          ║
-    ║    Error → diagnose root cause → fix → Phase 4.     ║
-    ║    Success → clean up, document, hand to Po.        ║
-    ╚══════════════════════════════════════════════════════╝
+    Follow this loop:
+    1. UNDERSTAND — Read the context from previous steps fully
+    2. INSTALL — Install required packages, verify each install
+    3. WRITE — Write minimal code to test core logic (write to file first)
+    4. RUN — Execute via Terminal tool, read ALL stdout and stderr
+    5. ASSESS — Compare output against what the user asked for
+    6. FIX OR COMPLETE — Error? Diagnose, fix, go to step 4. Success? Done.
 
     All work goes inside {playground_dir}. No exceptions.
-
-    OUTPUT FORMAT — use exactly:
-
-    ---EXECUTION START---
-    STATUS: executed | not required
-
-    ENVIRONMENT SETUP:
-      Packages installed: <list or "none required">
-      Python version: <version>
-
-    IMPLEMENTATION STEPS:
-      1. <what you wrote/ran and why>
-      2. <what you wrote/ran and why>
-      ...
-
-    RUN LOG:
-      Run 1: `<command>` → exit <code>
-        stdout: <key output — truncate if very long>
-        stderr: <key errors or "clean">
-        assessment: pass | fail | partial — <reason>
-
-    FILES IN PLAYGROUND:
-      <filename>: <what it is>
-
-    FINAL OUTPUT:
-      <what was produced — be specific, include file paths>
-
-    SUCCESS CRITERIA VERDICT:
-      ✓ / ✗  "<criterion>" — <evidence from run output>
-
-    ISSUES & WORKAROUNDS:
-      - <issue and resolution — or "none">
-    ---EXECUTION END---
+    "No error" does not mean "correct" — verify the output is right.
   expected_output: >
-    An execution report enclosed between ---EXECUTION START--- and
-    ---EXECUTION END--- markers. If TIGRESS REQUIRED was no, a STATUS line
-    with reason is sufficient. Otherwise, must include ENVIRONMENT SETUP,
-    IMPLEMENTATION STEPS, a RUN LOG with every command attempted, FILES IN
-    PLAYGROUND, FINAL OUTPUT, and a SUCCESS CRITERIA VERDICT for every
-    criterion in Shifu's plan.
-
-review_task:
-  description: >
-    You are Master Shifu. The mission has been executed. Now you judge.
-
-    ORIGINAL USER REQUEST:
-    {user_input}
-
-    ORIGINAL PLAN:
-    {planning_output}
-
-    FILESYSTEM / CONTENT REPORT (Po):
-    {filesystem_output}
-
-    EXECUTION REPORT (Tigress):
-    {execution_output}
-
-    Your job is not to be kind. Your job is to be right.
-
-    ── REVIEW BY MISSION TYPE ────────────────────────────────────
-
-    For RESEARCH_AND_WRITE or FILESYSTEM_ONLY missions:
-      The key questions are:
-        - Does the file exist at the correct path? (Po should have confirmed this)
-        - Is the content complete, accurate, and well-structured?
-        - Does it actually answer what the user asked?
-
-    For CODE_AND_EXECUTE or MIXED missions:
-      The key questions are:
-        - Did Tigress's run log show actual successful output?
-        - Is every SUCCESS CRITERION from the plan met with evidence?
-        - Is the code clean and production-ready?
-        - Does the output match the user's intent, not just the literal plan spec?
-
-    For any mission type:
-      - "It ran without errors" is not success if the output is wrong
-      - "The file was written" is not success if the content is thin or off-topic
-      - If Po's verification read-back failed, that is an INCOMPLETE signal
-    ──────────────────────────────────────────────────────────────
-
-    If INCOMPLETE — write specific FEEDBACK that the responsible agent can
-    act on without asking clarifying questions.
-
-    If COMPLETE — write a MISSION SUMMARY the user can read directly.
-    Plain language. Concrete outputs. Exact file paths.
-
-    OUTPUT FORMAT — use exactly:
-
-    ---REVIEW START---
-    STATUS: COMPLETE | INCOMPLETE
-    MISSION TYPE: <from plan>
-
-    CRITERIA AUDIT:
-      ✓ / ✗  "<criterion>" — <evidence or gap>
-
-    QUALITY CHECK:
-      Content / output quality: pass | fail — <note>
-      Completeness: pass | fail — <note>
-      User intent match: pass | fail — <note>
-
-    FEEDBACK:
-      (only if STATUS is INCOMPLETE)
-      Responsible agent: Po | Tigress | both
-      Priority fixes:
-        1. <specific actionable fix>
-      Verification: <how the agent proves the fix worked>
-
-    MISSION SUMMARY:
-      (only if STATUS is COMPLETE)
-      What was produced: <description>
-      Where to find it: <exact file path(s)>
-      Contents overview: <2-3 sentence summary of what's in the output>
-
-    LESSONS LEARNED:
-      - <observation — or "none">
-    ---REVIEW END---
-  expected_output: >
-    A review report enclosed between ---REVIEW START--- and ---REVIEW END---
-    markers. Must include STATUS, MISSION TYPE, CRITERIA AUDIT for every
-    success criterion, QUALITY CHECK across three dimensions, and either
-    FEEDBACK (if incomplete) or MISSION SUMMARY (if complete). The LESSONS
-    LEARNED section is always required.
+    A brief execution report: what was built, commands run, final output,
+    and whether the user's request was fulfilled. Include file paths for
+    any code or output produced.
