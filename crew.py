@@ -44,7 +44,7 @@ class ShifuAssistantCrew():
                 
             ],
             llm=shifu_llm,
-            verbose=True,
+            verbose=False,
             allow_delegation=False
         )
 
