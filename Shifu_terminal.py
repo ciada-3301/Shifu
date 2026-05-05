@@ -11,6 +11,7 @@ Drop this file alongside your crew.py and run it directly.
 
 import sys
 import os
+import io
 import time
 import threading
 import itertools
@@ -204,10 +205,11 @@ def show_status(crew_loaded: bool) -> None:
     blank()
 
     rows = [
-        ("Agent",    "Shifu",               C.CYAN),
-        ("Model",    "ollama/gemma4:31b",   C.CYAN),
-        ("Process",  "Sequential",          C.CYAN),
-        ("Tools",    "Serper · PDF · FS",   C.CYAN),
+        ("Agent",    "Shifu (Smart Router)",  C.CYAN),
+        ("Model",    "ollama/gpt-oss:120b",   C.CYAN),
+        ("Process",  "Sequential + Routing",  C.CYAN),
+        ("Routes",   "DIRECT · RESEARCH · FILE_OPS · CODE", C.CYAN),
+        ("Tools",    "Serper · FS · Terminal", C.CYAN),
         ("Crew",     "LOADED" if crew_loaded else "NOT LOADED",
                      C.GREEN if crew_loaded else C.RED),
     ]
@@ -491,11 +493,12 @@ def _render_markdown_stream(text: str) -> None:
 
 
 # ── Public render entry point ─────────────────────────────────────────────────
-def render_response(result: str, elapsed: float) -> None:
+def render_response(result: str, elapsed: float, route: str = "") -> None:
     blank()
     divider("─", C.GOLD)
+    route_tag = f"  [{route}]" if route else ""
     print_line(
-        f"SHIFU  ›  {datetime.now().strftime('%H:%M:%S')}  ({elapsed:.1f}s)",
+        f"SHIFU  ›  {datetime.now().strftime('%H:%M:%S')}  ({elapsed:.1f}s){route_tag}",
         C.GOLD + C.BOLD
     )
     divider("─", C.GOLD)
@@ -536,10 +539,10 @@ def load_crew():
     Import ShifuAssistantCrew from crew.py in the same directory.
     Returns (crew_instance, None) on success or (None, error_message) on failure.
     """
-    # Add current working directory to path so 'crew' is importable
-    cwd = os.getcwd()
-    if cwd not in sys.path:
-        sys.path.insert(0, cwd)
+    # Add script directory to path so 'crew' is importable
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
 
     try:
         from crew import ShifuAssistantCrew  # type: ignore
@@ -629,24 +632,37 @@ def main() -> None:
                 blank()
                 continue
 
+            # Classify the route before dispatching
+            try:
+                from crew import classify_route
+                route = classify_route(user_input)
+            except Exception:
+                route = "CODE"  # fallback to full pipeline
+
             blank()
-            print_line(f"Dispatching to Shifu agent …", C.SYS)
+            print_line(f"Routing  →  {route}", C.SYS)
             blank()
 
             spinner = Spinner().start()
             t_start = time.time()
 
             try:
-                result = crew_instance.crew().kickoff(
-                    inputs={
-                        "user_input":        user_input,
-                        "playground_dir":    PLAYGROUND_DIR,
-                        "planning_output":   "",
-                        "research_output":   "",
-                        "filesystem_output": "",
-                        "execution_output":  "",
-                    }
+                # Suppress CrewAI verbose output during execution
+                _real_stdout = sys.stdout
+                _real_stderr = sys.stderr
+                sys.stdout = io.StringIO()
+                sys.stderr = io.StringIO()
+
+                try:
+                    result, route = crew_instance.route_and_run(
+                        user_input=user_input,
+                        playground_dir=PLAYGROUND_DIR,
                     )
+                finally:
+                    # Restore stdout/stderr no matter what
+                    sys.stdout = _real_stdout
+                    sys.stderr = _real_stderr
+
                 elapsed = time.time() - t_start
                 spinner.stop()
 
@@ -655,15 +671,19 @@ def main() -> None:
                     "query": user_input,
                 })
 
-                render_response(result, elapsed)
+                render_response(result, elapsed, route)
 
             except KeyboardInterrupt:
+                sys.stdout = _real_stdout if '_real_stdout' in dir() else sys.__stdout__
+                sys.stderr = _real_stderr if '_real_stderr' in dir() else sys.__stderr__
                 spinner.stop()
                 blank()
                 print_line("  Query interrupted by user.", C.GREY)
                 blank()
 
             except Exception as exc:
+                sys.stdout = _real_stdout if '_real_stdout' in dir() else sys.__stdout__
+                sys.stderr = _real_stderr if '_real_stderr' in dir() else sys.__stderr__
                 elapsed = time.time() - t_start
                 spinner.stop()
                 blank()

@@ -36,28 +36,22 @@ def get_file_type(filename: str) -> str:
 
 
 def run_shifu_crew(user_input: str, uploaded_files: list[dict], result_queue: queue.Queue):
-    """Run the CrewAI crew and push result to queue."""
+    """Run the CrewAI crew with smart routing and push result to queue."""
     try:
         from crew import ShifuAssistantCrew
 
-        inputs = {"user_input": user_input}
-
-        # Attach file paths to input context so agents can use them
+        # Attach file paths to input context if present
         if uploaded_files:
             file_context_parts = []
             for f in uploaded_files:
                 file_context_parts.append(f"[{f['type'].upper()}] {f['original_name']} -> {f['path']}")
-            inputs["attached_files"] = "\n".join(file_context_parts)
-            inputs["user_input"] = (
-                f"{user_input}\n\nAttached files:\n{inputs['attached_files']}"
-            )
+            user_input = f"{user_input}\n\nAttached files:\n" + "\n".join(file_context_parts)
 
-        crew_instance = ShifuAssistantCrew().crew()
-        result = crew_instance.kickoff(inputs=inputs)
-        result_queue.put({"success": True, "content": str(result)})
+        crew_instance = ShifuAssistantCrew()
+        result, route = crew_instance.route_and_run(user_input)
+        result_queue.put({"success": True, "content": str(result), "route": route})
 
     except ImportError:
-        # Fallback demo mode when crew.py isn't present
         import time
         demo_response = f"""## Shifu is ready! 🥷
 
@@ -70,17 +64,11 @@ To activate the full agent, make sure `crew.py` is in the same directory as `app
 ### What I can do when fully connected:
 - 🔍 **Web search** via Serper
 - 📄 **Read & write files**
-- 📚 **Search PDFs**
 - 🗂️ **Browse directories**
-
-```python
-# Quick start
-from crew import ShifuAssistantCrew
-result = ShifuAssistantCrew().crew().kickoff(inputs={{"user_input": "your task"}})
-```
+- 💻 **Write & execute code**
 """
         time.sleep(1.2)
-        result_queue.put({"success": True, "content": demo_response})
+        result_queue.put({"success": True, "content": demo_response, "route": "DEMO"})
 
     except Exception as e:
         result_queue.put({"success": False, "content": f"**Error:** {str(e)}"})
