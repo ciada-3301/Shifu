@@ -13,6 +13,15 @@ import os, sys, time, threading, textwrap, re, shutil
 from datetime import datetime
 from pathlib import Path
 import subprocess
+import re
+
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings(         
+    "ignore",
+    message=".*allowed_objects.*",
+)
 
 # ── palette ───────────────────────────────────────────────────────────────────
 class C:
@@ -59,8 +68,8 @@ _LOGO = [
     "  ░░░   ░░  ░░  ░░  ░░░░░  ░░   ░░",
     "  ▒▒▒   ▒▒  ▒▒  ▒▒  ▒▒     ▒▒   ▒▒",
     "  ▓███  ▓▓▓▓▓▓  ▓▓  ▓▓▓▓▓  ▓▓   ▓▓",
-    "    ▓▓  ██  ██  ██  ██       ██ ██ ",
-    "  ████  ██  ██  ██  ██        ███  ",
+    "    ▓▓  ██  ██  ██  ██      ██ ██ ",
+    "  ████  ██  ██  ██  ██       ███  ",
 ]
 
 _LOGO_ART = r"""
@@ -75,9 +84,14 @@ _LOGO_ART = r"""
 def boot():
     os.system("cls" if os.name == "nt" else "clear")
     blank()
+    
     for line in _LOGO_ART.strip("\n").split("\n"):
-        _write("  " + C.AB + line + C.R + "\n")
+        # This regex finds the non-space characters and wraps them in your color
+        # It keeps the background spaces transparent/default
+        styled_line = re.sub(r'([^\s]+)', rf'{C.AB}\1{C.R}', line)
+        _write("  " + styled_line + "\n")
         time.sleep(0.018)
+        
     blank()
     ts = datetime.now().strftime("%A, %d %B %Y  ·  %H:%M")
     _write("  " + C.G + ts + C.R + "\n")
@@ -91,12 +105,15 @@ def boot():
 # completes, then gets committed to a permanent summary line.
 
 _TOOL_ICONS = {
-    "web_search":       ("⌕", "search"),
-    "file_write":       ("↓", "write"),
-    "file_read":        ("↑", "read"),
-    "directory_read":   ("⊞", "ls"),
-    "terminal_command": ("$", "shell"),
-    "load_skill":       ("◈", "skill"),   # ← progressive disclosure
+    "web_search":           ("⌕", "search"),
+    "file_write":           ("↓", "write"),
+    "file_read":            ("↑", "read"),
+    "directory_read":       ("⊞", "ls"),
+    "terminal_command":     ("$", "shell"),
+    "load_skill":           ("◈", "skill"),
+    "browser_task":         ("🌐", "browse"),
+    "browser_screenshot":   ("📷", "screen"),
+    "browser_extract_text": ("📄", "extract"),
 }
 
 class CheckpointBar:
