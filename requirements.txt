@@ -1,0 +1,18 @@
+# Shifu — LangGraph/LangChain agent dependencies
+# Install with: pip install -r requirements.txt
+
+# Core LangChain / LangGraph
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-ollama>=0.2.0
+langgraph>=0.2.0
+
+# Search (replaces SerperDevTool — no API key needed)
+duckduckgo-search>=6.0.0
+
+# Browser automation (optional — used in original sketch)
+# browser-use>=0.1.0
+
+# Utilities
+python-dotenv>=1.0.0
