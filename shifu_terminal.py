@@ -12,6 +12,7 @@ Every pixel earns its place.
 import os, sys, time, threading, textwrap, re, shutil
 from datetime import datetime
 from pathlib import Path
+import subprocess
 
 # ── palette ───────────────────────────────────────────────────────────────────
 class C:
