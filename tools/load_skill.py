@@ -4,6 +4,28 @@ from pathlib import Path
 SKILLS_DIR = Path("skills")
 SKILLS_DIR.mkdir(exist_ok=True)
 
+def _scan_skills():
+    """Scans the SKILLS_DIR for subdirectories containing SKILL.md files."""
+    skills_map = {}
+    if not SKILLS_DIR.exists():
+        return skills_map
+
+    # Looks for skills/some_skill/SKILL.md
+    for skill_path in SKILLS_DIR.iterdir():
+        if skill_path.is_dir():
+            md_file = skill_path / "SKILL.md"
+            if md_file.exists():
+                # Use the folder name as the key (e.g., 'coding-expert')
+                skills_map[skill_path.name] = {
+                    "name": skill_path.name.replace("-", " ").title(),
+                    "path": str(md_file)
+                }
+    return skills_map
+
+# Initialize the global variable
+SKILLS = _scan_skills()
+
+
 @tool
 def load_skill(skill_name: str) -> str:
     """
