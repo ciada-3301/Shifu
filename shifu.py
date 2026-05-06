@@ -11,6 +11,13 @@ Complex mission → planner drafts a step-by-step plan →
 All generated files land in ./Playground/
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings(         
+    "ignore",
+    message=".*allowed_objects.*",
+)
 import os
 import subprocess
 import time
@@ -41,12 +48,16 @@ def load_all_tools_from_package(package):
 
 load_dotenv()
 
-# ── Playground ────────────────────────────────────────────────────────────────
+# ── High Level Variables ────────────────────────────────────────────────────────────────
 PLAYGROUND_DIR = Path("Playground")
 PLAYGROUND_DIR.mkdir(exist_ok=True)
-
+SKILLS_DIR = Path("skills")
+SKILLS_DIR.mkdir(exist_ok=True)
+MAX_RPM = 20
 MODEL_NAME = "gpt-oss:120b-cloud"
 BASE_URL   = "https://ollama.com/v1"
+MAX_ITERATIONS = 50
+MAX_RETRIES    = 10
 
 def _make_llm(api_key_env: str) -> ChatOpenAI:
     return ChatOpenAI(
@@ -61,7 +72,7 @@ planner_llm  = _make_llm("OLLAMA_API_KEY_PLANNER")
 executor_llm = _make_llm("OLLAMA_API_KEY_EXECUTOR")
 
 # ── Rate-limit shim ───────────────────────────────────────────────────────────
-MAX_RPM = 20
+
 _last_call_time: float = 0.0
 
 def _rate_limited_invoke(llm, messages):
@@ -75,10 +86,7 @@ def _rate_limited_invoke(llm, messages):
     return result
 
 # ── Skills registry ───────────────────────────────────────────────────────────
-SKILLS_DIR = Path("skills")
-SKILLS_DIR.mkdir(exist_ok=True)
-MAX_ITERATIONS = 50
-MAX_RETRIES    = 10
+
 
 def _scan_skills() -> dict[str, dict]:
     import re as _re
@@ -152,7 +160,15 @@ CONVENTIONS:
 
 REVIEWER_SYSTEM = """You are Shifu's quality reviewer.
 
-Given the mission and the agent's output, reply in exactly this format:
+A mission is COMPLETE if ANY of these are true:
+- The agent output contains '✅ DONE:'
+- A tool successfully completed the core task (e.g. browser opened a page, file was written, search returned results)
+- The output describes a successfully completed action with no errors
+
+Only say RETRY if there was a clear tool ERROR, exception, or the task was genuinely not attempted.
+Do NOT retry just because the output is brief or doesn't contain a specific keyword.
+
+Reply in exactly this format:
 VERDICT: PASS
 or
 VERDICT: RETRY — <one-sentence reason>
@@ -224,11 +240,29 @@ def tools_node(state: ShifuState) -> ShifuState:
     return {**state, "messages": result["messages"]}
 
 def review_node(state: ShifuState) -> ShifuState:
+    from langchain_core.messages import ToolMessage
+
+    # If the last real message is a successful ToolMessage, just pass
+    last_tool = next(
+        (m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)),
+        None,
+    )
     last_ai = next(
         (m for m in reversed(state["messages"]) if isinstance(m, AIMessage)),
         None,
     )
-    agent_output = last_ai.content if last_ai else "(no output)"
+    agent_output = ""
+    if last_ai:
+        agent_output += last_ai.content or ""
+    if last_tool:
+        agent_output += "\n[Tool result]: " + str(last_tool.content)[:500]
+
+    # Fast-path: if tool result exists and no error keywords, pass immediately
+    if last_tool:
+        err_keywords = ("error", "exception", "failed", "traceback", "timeout")
+        tool_text = str(last_tool.content).lower()
+        if not any(k in tool_text for k in err_keywords):
+            return {**state, "verdict": "PASS", "retry_count": state["retry_count"]}
 
     resp = _rate_limited_invoke(planner_llm, [
         SystemMessage(content=REVIEWER_SYSTEM),
@@ -398,9 +432,6 @@ def run_mission(mission: str) -> str:
         "retry_count": 0,
     }
 
-    _divider("━")
-    print(f"{_BOLD} 🐾  SHIFU  —  Mission received{_RESET}")
-    print(f"   {_DIM}{mission}{_RESET}")
     _divider("━")
 
     prev_state = None
