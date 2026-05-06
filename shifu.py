@@ -25,7 +25,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
+# memory removed — each mission is stateless
 import importlib
 import pkgutil
 import tools  # Import your tools package
@@ -82,9 +82,67 @@ def _rate_limited_invoke(llm, messages):
     _last_call_time = time.time()
     return result
 
+# ── Skills registry ───────────────────────────────────────────────────────────
+# Progressive disclosure: the agent receives only a short index at boot.
+# When it needs deep expertise it calls `load_skill(name)` to read the full
+# SKILL.md — keeping the context window lean by default.
+#
+# Layout on disk:
+#   skills/
+#   └── <skill_name>/
+#       └── SKILL.md          ← YAML front-matter + full instructions
+
+SKILLS_DIR = Path("skills")
+SKILLS_DIR.mkdir(exist_ok=True)
+
+def _scan_skills() -> dict[str, dict]:
+    """
+    Walk skills/ and parse the YAML front-matter from every SKILL.md.
+    Returns { skill_name: { "name", "description", "tags", "path" } }
+    """
+    import re as _re
+    registry: dict[str, dict] = {}
+    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+        skill_name = skill_md.parent.name
+        text = skill_md.read_text(encoding="utf-8")
+        # Extract YAML front-matter between first --- ... ---
+        fm: dict = {}
+        m = _re.match(r'^---\s*\n(.*?)\n---', text, _re.DOTALL)
+        if m:
+            for line in m.group(1).splitlines():
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    fm[k.strip()] = v.strip().strip('"').strip("'")
+        registry[skill_name] = {
+            "name":        fm.get("name", skill_name),
+            "description": fm.get("description", "(no description)"),
+            "tags":        fm.get("tags", ""),
+            "path":        str(skill_md),
+        }
+    return registry
+
+# Loaded once at startup; refreshed if `load_skill` detects a new file.
+SKILLS: dict[str, dict] = _scan_skills()
+
+def _skills_index() -> str:
+    """One-line summary per skill — injected into EXECUTOR_SYSTEM."""
+    if not SKILLS:
+        return "  (no skills installed — add SKILL.md files to skills/)"
+    lines = []
+    for name, meta in SKILLS.items():
+        lines.append(f"  • {name:<22} {meta['description']}")
+    return "\n".join(lines)
+
+
+# ── Skill tool ────────────────────────────────────────────────────────────────
+
+
+
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
-TOOLS = load_all_tools_from_package(tools)
+_package_tools = load_all_tools_from_package(tools)
+TOOLS = _package_tools
 tool_node = ToolNode(TOOLS)
 executor_with_tools = executor_llm.bind_tools(TOOLS)
 
@@ -104,30 +162,48 @@ Reply with exactly one word: SIMPLE or COMPLEX.
 Draft a concise, numbered execution plan for the executor agent.
 Rules:
 - Each step is a single, atomic action.
-- Reference specific tools: web_search, terminal_command, file_write, file_read, directory_read.
+- Reference specific tools: web_search, terminal_command, file_write, file_read,
+  directory_read, load_skill.
+- If the mission matches an available skill, include "load_skill(<name>)" as step 1.
 - All file paths must live inside Playground/.
 - No more than 10 steps. Ruthlessly consolidate.
 - End with: "PLAN COMPLETE."
 """
 
-EXECUTOR_SYSTEM = f"""You are Shifu — a single autonomous agent that gets things done.
 
-You have these tools:
+def _build_executor_system() -> str:
+    """Rebuild dynamically so skills index stays current."""
+    return f"""You are Shifu — a single autonomous agent that gets things done.
+
+CORE TOOLS:
   • web_search        — search the internet
   • terminal_command  — run shell commands
   • file_write        — write files (auto-scoped to Playground/)
   • file_read         — read files (auto-scoped to Playground/)
   • directory_read    — list directory contents (auto-scoped to Playground/)
 
-Ground rules:
-  1. ALL files you create must go inside  Playground/  (relative paths are auto-scoped).
-  2. Follow the execution plan step-by-step if one is provided.
-  3. Use tools — do NOT hallucinate file contents or command outputs.
-  4. After completing all steps, write a concise final summary starting with "✅ DONE:".
-  5. Max 15 tool-call iterations per mission.
+SKILL TOOL:
+  • load_skill(name)  — load full expert instructions for a skill domain.
+                        Call this FIRST when your mission matches a skill below.
 
-Playground path: {PLAYGROUND_DIR.resolve()}
+AVAILABLE SKILLS:
+{_skills_index()}
+
+GROUND RULES:
+  1. ALL files you create must go inside  Playground/  (relative paths are auto-scoped).
+  2. If a skill matches the task, call load_skill() before doing any work.
+  3. Follow the execution plan step-by-step if one is provided.
+  4. Use tools — do NOT hallucinate file contents or command outputs.
+  5. After completing all steps, write a concise final summary starting with "✅ DONE:".
+  6. Max {MAX_ITERATIONS} tool-call iterations per mission.
+
+Playground: {PLAYGROUND_DIR.resolve()}
+Skills dir: {SKILLS_DIR.resolve()}
 """
+
+# The string is rebuilt at execute time (inside execute_node) so newly-added
+# skills are always reflected without restarting.
+EXECUTOR_SYSTEM = _build_executor_system()
 
 REVIEWER_SYSTEM = """You are Shifu's quality reviewer.
 
@@ -199,18 +275,20 @@ def execute_node(state: ShifuState) -> ShifuState:
     else:
         user_content = f"Mission: {state['mission']}"
 
-    # Prepend system + user turn if first call
+    # Prepend system + user turn if first call.
+    # Rebuild EXECUTOR_SYSTEM each time so any newly-loaded skill shows up.
     if not state["messages"]:
         msgs: list[BaseMessage] = [
-            SystemMessage(content=EXECUTOR_SYSTEM),
+            SystemMessage(content=_build_executor_system()),
             HumanMessage(content=user_content),
         ]
     else:
         msgs = state["messages"]
 
     response = _rate_limited_invoke(executor_with_tools, msgs)
+    new_messages = (msgs if not state["messages"] else []) + [response]
     return {**state,
-            "messages":   state["messages"] + ([] if state["messages"] else [SystemMessage(content=EXECUTOR_SYSTEM), HumanMessage(content=user_content)]) + [response],
+            "messages":   state["messages"] + new_messages,
             "iterations": state["iterations"] + 1}
 
 # ── Node: Tools ───────────────────────────────────────────────────────────────
@@ -298,7 +376,7 @@ def build_graph():
         END:       END,
     })
 
-    return g.compile(checkpointer=MemorySaver())
+    return g.compile()  # stateless
 
 shifu_graph = build_graph()
 
@@ -439,7 +517,6 @@ def run_mission(mission: str) -> str:
     Prints a live checkpoint banner for every graph node as it completes.
     """
     import time as _time
-    config = {"configurable": {"thread_id": "shifu-session"}}
     initial_state: ShifuState = {
         "messages":    [],
         "mission":     mission,
@@ -459,7 +536,7 @@ def run_mission(mission: str) -> str:
     final_state: ShifuState | None = None
     t0 = _time.time()
 
-    for step in shifu_graph.stream(initial_state, config=config, stream_mode="values"):
+    for step in shifu_graph.stream(initial_state, stream_mode="values"):
         node = _detect_node(prev_state, step)
         if node:
             _header(node)
