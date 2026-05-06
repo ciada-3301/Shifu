@@ -26,11 +26,25 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
-from tools.terminal_command import terminal_command
-from tools.file_write import file_write
-from tools.file_read import file_read
-from tools.directory_read import directory_read
-from tools.search_tool import search_tool
+import importlib
+import pkgutil
+import tools  # Import your tools package
+from langchain_core.tools import BaseTool
+
+def load_all_tools_from_package(package):
+    all_tools = []
+    
+    # Iterate through all modules in the 'tools' folder
+    for loader, module_name, is_pkg in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+        # Import the module dynamically
+        module = importlib.import_module(module_name)
+        
+        # Look for everything in the module that is a LangChain tool
+        for name, obj in vars(module).items():
+            if isinstance(obj, BaseTool):
+                all_tools.append(obj)
+                
+    return all_tools
 
 load_dotenv()
 
@@ -70,7 +84,7 @@ def _rate_limited_invoke(llm, messages):
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
-TOOLS = [terminal_command, file_write, file_read, directory_read, search_tool]
+TOOLS = load_all_tools_from_package(tools)
 tool_node = ToolNode(TOOLS)
 executor_with_tools = executor_llm.bind_tools(TOOLS)
 
