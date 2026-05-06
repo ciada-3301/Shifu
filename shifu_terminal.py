@@ -95,6 +95,7 @@ _TOOL_ICONS = {
     "file_read":        ("↑", "read"),
     "directory_read":   ("⊞", "ls"),
     "terminal_command": ("$", "shell"),
+    "load_skill":       ("◈", "skill"),   # ← progressive disclosure
 }
 
 class CheckpointBar:
@@ -340,12 +341,40 @@ def show_history():
         _write(f"  {C.G}{i:02d}  {e['t']}{C.R}  {C.W}{q}{C.R}\n")
     blank()
 
+def show_skills():
+    """List all skills currently installed in the skills/ directory."""
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+    try:
+        import shifu as _s
+        skills = _s._scan_skills()
+    except Exception as e:
+        _write("  " + C.ERR + f"⚠  could not read skills: {e}" + C.R + "\n")
+        return
+
+    blank(); dim_line()
+    _write("  " + C.AB + "installed skills" + C.R + "\n"); dim_line()
+
+    if not skills:
+        _write("  " + C.G + "no skills installed yet.\n" + C.R)
+        _write("  " + C.G + "create  skills/<name>/SKILL.md  to add one.\n" + C.R)
+    else:
+        for name, meta in skills.items():
+            tags = f"  {C.GD}[{meta['tags']}]{C.R}" if meta['tags'] else ""
+            _write(f"  {C.A}◈{C.R}  {C.W}{name:<22}{C.R}  {C.G}{meta['description']}{C.R}{tags}\n")
+        _write(f"\n  {C.GD}skills dir → {_s.SKILLS_DIR.resolve()}{C.R}\n")
+    blank()
+
+
 def show_help():
     blank(); dim_line()
     _write("  " + C.AB + "commands" + C.R + "\n"); dim_line()
     for cmd, desc in [
         ("help / ?",    "this panel"),
         ("history",     "mission log"),
+        ("skills",      "list installed skills"),
+        ("files",       "supported file types"),
         ("clear / cls", "reset screen"),
         ("exit / quit", "shutdown"),
         ("<anything>",  "send to shifu"),
@@ -413,7 +442,6 @@ def _run_with_checkpoints(shifu_mod, mission: str, bar: CheckpointBar) -> str:
     """
     from langchain_core.messages import AIMessage, ToolMessage
 
-    config = {"configurable": {"thread_id": "shifu-live"}}
     initial = {
         "messages":    [],
         "mission":     mission,
@@ -427,7 +455,7 @@ def _run_with_checkpoints(shifu_mod, mission: str, bar: CheckpointBar) -> str:
     prev   = None
     final  = None
 
-    for step in shifu_mod.shifu_graph.stream(initial, config=config, stream_mode="values"):
+    for step in shifu_mod.shifu_graph.stream(initial, stream_mode="values"):
         # ── detect which node just ran ────────────────────────────────────
         if prev is None:
             bar.node("classify")
@@ -516,6 +544,8 @@ def main():
             boot()
         elif cmd == "history":
             show_history()
+        elif cmd in ("skills", "skill"):
+            show_skills()
         elif cmd in ("files", "filetypes", "supported"):
             show_file_support()
         else:
