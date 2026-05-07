@@ -1,4 +1,6 @@
 .env
+google_credentials.json
+google_token.pickle
 crew.cpython-313.pyc
 /tools/__pycache__
 /Playground
