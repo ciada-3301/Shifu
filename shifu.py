@@ -48,7 +48,7 @@ def load_all_tools_from_package(package):
 
 load_dotenv()
 
-# ── High Level Variables ────────────────────────────────────────────────────────────────
+# ── Variables ────────────────────────────────────────────────────────────────
 PLAYGROUND_DIR = Path("Playground")
 PLAYGROUND_DIR.mkdir(exist_ok=True)
 SKILLS_DIR = Path("skills")
@@ -116,7 +116,7 @@ def _skills_index() -> str:
         return "  (no skills installed)"
     lines = []
     for name, meta in SKILLS.items():
-        lines.append(f"  • {name:<26} {meta['description']}")
+        lines.append(f"  • load_skill(\"{name}\")  —  {meta['description']}")
     return "\n".join(lines)
 
 
@@ -130,6 +130,9 @@ executor_with_tools = executor_llm.bind_tools(TOOLS)
 
 PLANNER_SYSTEM = """You are Shifu's strategic mind.
 
+AVAILABLE SKILLS (use the exact string for load_skill — do not paraphrase):
+{_skills_index()}
+
 [CLASSIFY]
 Reply with exactly one word — SIMPLE or COMPLEX.
 - SIMPLE: single-step, one-tool, or trivial.
@@ -139,7 +142,9 @@ Reply with exactly one word — SIMPLE or COMPLEX.
 Write a numbered execution plan for the executor.
 Rules:
 - Each step is one atomic action.
-- If the mission matches a skill, put load_skill(<name>) as step 1.
+- If the mission matches a skill, put load_skill("<exact-name-from-index>") as step 1.
+- Use sensible defaults — never add a step that asks the user for missing info.
+  Missing end time → default to 1 hour. Missing title → use a sensible name.
 - All file paths must be inside Playground/.
 - 10 steps maximum.
 - End with: PLAN COMPLETE.
@@ -148,15 +153,15 @@ Rules:
 def _build_executor_system() -> str:
     return f"""You are Shifu — an autonomous agent.
 
-SKILLS (call load_skill(<name>) to read full instructions before starting):
-{_skills_index()}
+    SKILLS (call load_skill with the exact string shown below — copy it verbatim):
+    {_skills_index()}
 
-CONVENTIONS:
-- All files go inside Playground/  →  {PLAYGROUND_DIR.resolve()}
-- Use tools — never hallucinate outputs.
-- End every mission with a summary starting: ✅ DONE:
-- Max {MAX_ITERATIONS} tool-call iterations.
-"""
+    CONVENTIONS:
+    - All files go inside Playground/  →  {PLAYGROUND_DIR.resolve()}
+    - Use tools — never hallucinate outputs.
+    - End every mission with a summary starting: ✅ DONE:
+    - Max {MAX_ITERATIONS} tool-call iterations.
+    """
 
 REVIEWER_SYSTEM = """You are Shifu's quality reviewer.
 
