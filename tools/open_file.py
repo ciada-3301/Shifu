@@ -26,12 +26,28 @@ from langchain_core.tools import tool
 
 _SYSTEM = platform.system()  # "Darwin" | "Linux" | "Windows"
 
-# Media extensions that benefit from the "play" label in feedback
 _AUDIO_EXT = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".wma", ".opus"}
 _VIDEO_EXT = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v"}
 _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".svg"}
 _DOC_EXT   = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
               ".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"}
+
+PLAYGROUND_DIR = Path("")
+
+
+def _resolve_path(path: str) -> Path:
+    """
+    Resolve a relative path against Playground/, stripping any redundant
+    leading 'Playground/' prefix first to avoid double-nesting.
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        try:
+            p = p.relative_to("")
+        except ValueError:
+            pass  # doesn't start with Playground/, use as-is
+        p = PLAYGROUND_DIR / p
+    return p.expanduser().resolve()
 
 
 def _os_open(path_or_url: str) -> tuple[bool, str]:
@@ -39,10 +55,8 @@ def _os_open(path_or_url: str) -> tuple[bool, str]:
     if _SYSTEM == "Darwin":
         cmd = ["open", path_or_url]
     elif _SYSTEM == "Windows":
-        # os.startfile is synchronous only; subprocess keeps the interface uniform
         cmd = ["cmd", "/c", "start", "", path_or_url]
     else:
-        # Linux / BSD — prefer xdg-open, fall back to gio / mimeopen
         for opener in ("xdg-open", "gio open", "mimeopen"):
             bin_name = opener.split()[0]
             if _which(bin_name):
@@ -62,7 +76,6 @@ def _os_reveal(path: str) -> tuple[bool, str]:
     elif _SYSTEM == "Windows":
         cmd = ["explorer", "/select,", str(p)]
     else:
-        # xdg-open on the parent directory is the most portable Linux approach
         cmd = ["xdg-open", str(p.parent)]
     return _run(cmd)
 
@@ -71,7 +84,6 @@ def _launch_app(app: str, args: list[str]) -> tuple[bool, str]:
     """Launch *app* (name or full path) with optional *args*."""
     if _SYSTEM == "Darwin":
         if not app.endswith(".app") and not os.sep in app:
-            # Try `open -a AppName` first (handles .app bundles by name)
             ok, msg = _run(["open", "-a", app] + args)
             if ok:
                 return ok, msg
@@ -91,9 +103,8 @@ def _run(cmd: list[str], timeout: int = 8) -> tuple[bool, str]:
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            start_new_session=True,   # detach from Shifu's process group
+            start_new_session=True,
         )
-        # Give the process a moment to fail fast (e.g. "not found")
         time.sleep(0.4)
         poll = result.poll()
         if poll is not None and poll != 0:
@@ -166,7 +177,6 @@ def open_file(
     action = action.strip().lower()
     extra_args = shlex.split(app_args) if app_args.strip() else []
 
-    # ── Validate action ────────────────────────────────────────────────────
     valid_actions = ("open", "play", "launch", "reveal")
     if action not in valid_actions:
         return (
@@ -174,7 +184,7 @@ def open_file(
             f"Choose one of: {', '.join(valid_actions)}."
         )
 
-    # ── LAUNCH — open a named application ─────────────────────────────────
+    # ── LAUNCH ────────────────────────────────────────────────────────────
     if action == "launch":
         if not path:
             return "❌ Provide the application name or path in the 'path' argument."
@@ -183,36 +193,29 @@ def open_file(
             return f"✅ Application launched: {path!r}"
         return f"❌ Failed to launch {path!r}: {msg}"
 
-    # ── Resolve file path (non-launch actions) ─────────────────────────────
+    # ── Resolve file path ─────────────────────────────────────────────────
     is_url = path.startswith(("http://", "https://", "ftp://"))
     if not is_url:
-        resolved = Path(path).expanduser().resolve()
+        resolved = _resolve_path(path)
         if not resolved.exists():
-            # Try relative to Playground/
-            playground_candidate = Path("Playground") / path
-            if playground_candidate.exists():
-                resolved = playground_candidate.resolve()
-            else:
-                return (
-                    f"❌ File not found: {path!r}\n"
-                    f"   Checked: {resolved}\n"
-                    f"   Also tried: {playground_candidate.resolve()}"
-                )
+            return (
+                f"❌ File not found: {path!r}\n"
+                f"   Resolved to: {resolved}"
+            )
         target = str(resolved)
         category = _classify(target)
     else:
         target = path
         category = "URL"
 
-    # ── REVEAL ─────────────────────────────────────────────────────────────
+    # ── REVEAL ────────────────────────────────────────────────────────────
     if action == "reveal":
         ok, msg = _os_reveal(target)
         if ok:
             return f"✅ Revealed {category} in file manager: {target!r}"
         return f"❌ Could not reveal file: {msg}"
 
-    # ── OPEN / PLAY ────────────────────────────────────────────────────────
-    # If a specific app was requested, launch it with the file as argument
+    # ── OPEN / PLAY ───────────────────────────────────────────────────────
     if app.strip():
         app_name = app.strip()
         if _SYSTEM == "Darwin":
@@ -227,7 +230,6 @@ def open_file(
             return f"✅ {verb} {category} with {app_name!r}: {target!r}"
         return f"❌ Failed to open with {app_name!r}: {msg}"
 
-    # Default OS handler
     ok, msg = _os_open(target)
     verb = "Playing" if action == "play" else "Opening"
     if ok:

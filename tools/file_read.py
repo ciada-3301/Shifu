@@ -1,7 +1,7 @@
 from langchain_core.tools import tool
 from pathlib import Path
 
-PLAYGROUND_DIR = Path("Playground")
+PLAYGROUND_DIR = Path("")
 PLAYGROUND_DIR.mkdir(exist_ok=True)
 @tool
 def file_read(filepath: str) -> str:
@@ -11,7 +11,7 @@ def file_read(filepath: str) -> str:
                PDF (.pdf — needs pypdf),
                Word (.docx — needs python-docx),
                Excel (.xlsx/.xls — needs openpyxl).
-    Relative paths are resolved against Playground/.
+    Paths that are NOT absolute are resolved relative to Playground/.
     """
     path = Path(filepath)
     if not path.is_absolute():
