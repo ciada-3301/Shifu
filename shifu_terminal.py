@@ -235,7 +235,7 @@ class IdleSpinner:
 def _inline_md(t: str) -> str:
     """Render inline markdown: bold, italic, inline-code."""
     t = re.sub(r'`([^`\n]+)`',
-               C.PANELBG + C.A + r' \1 ' + C.RBG + C.W, t)
+               C.PANELBG + C.A + r' \1 ' + C.RBG + C.R + C.W, t)
     t = re.sub(r'\*\*(.+?)\*\*',
                C.BOLD + C.W + r'\1' + C.R + C.W, t)
     t = re.sub(r'\*(.+?)\*',
@@ -274,7 +274,12 @@ def render_response(text: str, elapsed: float):
 
     def wrap_and_box(raw: str, prefix=""):
         available = iw - len(prefix)
-        for wl in textwrap.wrap(raw, width=max(40, available)) or [""]:
+        for wl in textwrap.wrap(
+            raw,
+            width=max(40, available),
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""]:
             box_line(prefix + C.W + _inline_md(wl) + C.R)
 
     while i < len(lines):
@@ -334,6 +339,52 @@ def render_response(text: str, elapsed: float):
             lvl = len(nm.group(1)) // 2
             wrap_and_box(nm.group(3), "  " * lvl + C.A + nm.group(2) + ". " + C.W)
             i += 1; continue
+
+        # markdown table
+        if "|" in ln and re.match(r'^\s*\|', ln):
+            # collect all consecutive table lines
+            table_lines = []
+            while i < len(lines) and "|" in lines[i] and re.match(r'^\s*\|', lines[i]):
+                table_lines.append(lines[i])
+                i += 1
+            # filter out separator rows (---|---|---)
+            rows = [
+                [cell.strip() for cell in re.split(r'\|', tl.strip().strip('|'))]
+                for tl in table_lines
+                if not re.match(r'^[\s|:\-]+$', tl)
+            ]
+            if rows:
+                col_count = max(len(r) for r in rows)
+                # pad rows to equal width
+                rows = [r + [''] * (col_count - len(r)) for r in rows]
+                # compute column widths (capped so table fits in box)
+                max_table_w = iw - col_count * 3 - 2
+                col_w = []
+                for c in range(col_count):
+                    cw = max(len(r[c]) for r in rows)
+                    col_w.append(min(cw, max(6, max_table_w // col_count)))
+                def _trow(cells, widths, color):
+                    parts = []
+                    for j, cell in enumerate(cells):
+                        capped = cell[:widths[j]].ljust(widths[j])
+                        parts.append(color + capped + C.R)
+                    return "  " + C.GD + "│" + C.R + " " + (" " + C.GD + "│" + C.R + " ").join(parts) + " " + C.GD + "│" + C.R
+                def _tsep(widths):
+                    return "  " + C.GD + "├" + "┼".join("─" * (w + 2) for w in widths) + "┤" + C.R
+                def _ttop(widths):
+                    return "  " + C.GD + "┌" + "┬".join("─" * (w + 2) for w in widths) + "┐" + C.R
+                def _tbot(widths):
+                    return "  " + C.GD + "└" + "┴".join("─" * (w + 2) for w in widths) + "┘" + C.R
+                box_line("")
+                _write(_ttop(col_w) + "\n")
+                for ri, row in enumerate(rows):
+                    color = C.AB if ri == 0 else C.W
+                    _write(_trow(row, col_w, color) + "\n")
+                    if ri == 0:
+                        _write(_tsep(col_w) + "\n")
+                _write(_tbot(col_w) + "\n")
+                box_line("")
+            continue
 
         # normal paragraph
         wrap_and_box(ln)
@@ -572,8 +623,6 @@ def main():
                 blank(); continue
 
             blank()
-            dim_line()
-            _write("  " + C.W + raw[:tw() - 6] + C.R + "\n")
             dim_line()
             blank()
 
