@@ -12,6 +12,11 @@ def directory_read(dirpath: str = ".") -> str:
     """
     path = Path(dirpath)
     if not path.is_absolute():
+        # Strip redundant leading "Playground/" to avoid double-nesting
+        try:
+            path = path.relative_to("Playground")
+        except ValueError:
+            pass  # path doesn't start with Playground/, use as-is
         path = PLAYGROUND_DIR / path
     if not path.exists():
         return f"Error: directory not found — {path}"
