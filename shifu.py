@@ -196,7 +196,7 @@ def _make_llm(env_key: str) -> ChatOpenAI:
     return ChatOpenAI(
         model=MODEL_NAME, base_url=BASE_URL,
         api_key=os.getenv(env_key),
-        temperature=0.4,
+        temperature=0.5,
         max_tokens=4096,
         streaming=True,         # ← must be True for astream_events
     )
@@ -258,7 +258,8 @@ AVAILABLE SKILLS:
 {_skills_index()}
 
 [CLASSIFY]  Reply with exactly one word: SIMPLE or COMPLEX.
-  SIMPLE  = one tool call or one obvious step.
+  SIMPLE  = SIMPLE  = one tool call or one obvious step, including casual chat or
+            emotional input that just needs a memory recall + warm reply.
   COMPLEX = multiple steps, ambiguity, or research needed.
 
 [NEEDS_CLARIFICATION]  Reply with either:
@@ -271,19 +272,49 @@ things you can default. Prefer one good question over several small ones.
 [PLAN]  Write a numbered execution plan.
   - Each step is one atomic action.
   - If a skill matches, put load_skill("<exact-name>") as step 1.
+  - Step 2 (or step 1 for simple tasks): spada_recall relevant context.
+  - LAST step always: spada_memorise anything new learned this session.
   - All files go inside Playground/.
-  - Max 10 steps.  End with: PLAN COMPLETE.
+  - Max 10 steps. End with: PLAN COMPLETE.
 """
 
 _EXECUTOR_SYS = f"""You are Shifu — a capable, talkative AI agent who gets things done with tools.
 
 SKILLS (copy verbatim into load_skill):
 {_skills_index()}
+══ MEMORY RULES ══════════════════════════════════════════════════════════
+══ MEMORY ════════════════════════════════════════════════════════════════
+M1. RECALL FIRST — always run spada_recall before anything else, even for
+    casual messages. Query intent + likely context (hobbies, mood, projects).
 
+M2. TANGENTIAL IS FINE — recalled atoms are context, not just answers.
+    Chess memory + "I'm bored" → "hop on chess.com?" Connect the dots.
+
+M3. STORE — after every exchange, call spada_memorise
+    on anything worth keeping. No permission needed. Categories to watch:
+    personal facts · preferences · hobbies · ongoing projects · decisions
+    · emotional patterns · research results · task outcomes. Remember your memory
+    is your temple, don't polute it with unnecessary things, it will make 
+    things difficult for you later
+
+M4. LOW SCORES ARE USABLE — score < 0.5 → surface softly:
+    "I vaguely remember you mentioned X — still true?"
+    Never hallucinate. Always flag uncertainty.
+
+M5. NO EXCUSES — never say "I don't remember" without calling spada_recall
+    first. Skipping recall or storage = task failure.
+═════════════════════════════════════════════════════════════════════════
 ══ CRITICAL RULES ════════════════════════════════════════════════════════
 1. ALWAYS USE TOOLS TO CREATE FILES.
    Never write file content in your response text. Call the file-writing
    tool for every file. Writing code in your response = task failure.
+
+1a. NEVER CREATE FILES FOR CONVERSATIONAL RESPONSES.
+    Recommendations, explanations, lists, opinions, casual chat, and
+    memory-based answers must be written directly in your response text —
+    NOT saved to Playground/. Ask yourself: did the user ask you to build
+    or save something? If no, do not touch the file system.
+    Creating an unrequested file = task failure.
 
 2. ALL files go inside Playground/ → {PLAYGROUND_DIR.resolve()}
    Always use full paths like "Playground/todo_app/app.py".
@@ -303,7 +334,7 @@ FLOW — this is how you must sound, every single response:
   Before your first tool call:
     Write 2-3 sentences telling the user what you understand the mission to
     be, what you are about to do first, and why. Natural English. First
-    person. No bullet lists. No "Task received." Sound like a colleague who
+    person. No bullet lists. No "Task received." Sound like a friend who
     actually knows what they are doing.
 
   After each tool result:
@@ -320,7 +351,7 @@ FLOW — this is how you must sound, every single response:
 Max {MAX_ITERATIONS} tool-call iterations.
 """
 
-_REVIEWER_SYS = """You are Shifu's quality reviewer.
+_REVIEWER_SYS = """You are a quality reviewer.
 
 PASS if ANY of these are true:
   • The agent output contains "Alright, I'm done"
@@ -521,14 +552,15 @@ shifu_graph = _build_graph()
 #  routing.  Non-executor nodes run silently and fast.
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _stream_executor_turn(messages: list[BaseMessage], silent: bool = False) -> AIMessage:
-    """
-    Stream the executor response token-by-token and return the full AIMessage.
-    If silent=True, collects tokens without printing (used for final turn).
-    """
-    full_text    = ""
-    tool_calls   = []
-    in_text      = False
+async def _stream_executor_turn(
+    messages: list[BaseMessage],
+    silent: bool = False,
+    stop_on: str | None = None,
+) -> AIMessage:
+    full_text       = ""
+    tool_calls      = []
+    in_text         = False
+    printing_paused = False
 
     if not silent:
         _w("\n  " + C.A + "│" + C.R + "  ")
@@ -538,45 +570,39 @@ async def _stream_executor_turn(messages: list[BaseMessage], silent: bool = Fals
 
         if kind == "on_chat_model_stream":
             chunk = event["data"]["chunk"]
-            # text delta
             if hasattr(chunk, "content") and chunk.content:
                 token = chunk.content if isinstance(chunk.content, str) else ""
                 if token:
                     full_text += token
-                    if not silent:
-                        in_text = True
-                        _w(C.STREAM + token + C.R)
-                        sys.stdout.flush()
+                    if not silent and not printing_paused:
+                        # stop printing once the marker appears in accumulated text
+                        if stop_on and stop_on in full_text.lower():
+                            printing_paused = True
+                        else:
+                            in_text = True
+                            _w(C.STREAM + token + C.R)
+                            sys.stdout.flush()
 
-            # tool-call delta (accumulate)
             if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
                 for tc in chunk.tool_call_chunks:
                     idx = tc.get("index", 0)
                     while len(tool_calls) <= idx:
                         tool_calls.append({"id": "", "name": "", "args": ""})
-                    if tc.get("id"):
-                        tool_calls[idx]["id"] += tc["id"]
-                    if tc.get("name"):
-                        tool_calls[idx]["name"] += tc["name"]
-                    if tc.get("args"):
-                        tool_calls[idx]["args"] += tc["args"]
+                    if tc.get("id"):   tool_calls[idx]["id"]   += tc["id"]
+                    if tc.get("name"): tool_calls[idx]["name"] += tc["name"]
+                    if tc.get("args"): tool_calls[idx]["args"] += tc["args"]
 
     if in_text:
         _w("\n")
 
-    # Build a proper AIMessage
     import json
     parsed_tcs = []
     for tc in tool_calls:
-        try:
-            args = json.loads(tc["args"]) if tc["args"] else {}
-        except json.JSONDecodeError:
-            args = {"raw": tc["args"]}
+        try:    args = json.loads(tc["args"]) if tc["args"] else {}
+        except: args = {"raw": tc["args"]}
         parsed_tcs.append({
-            "id":   tc["id"] or str(uuid.uuid4()),
-            "name": tc["name"],
-            "args": args,
-            "type": "tool_call",
+            "id": tc["id"] or str(uuid.uuid4()),
+            "name": tc["name"], "args": args, "type": "tool_call",
         })
 
     return AIMessage(content=full_text, tool_calls=parsed_tcs)
@@ -826,7 +852,8 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
         _dim_line()
         bar.phase(f"shifu  (turn {iteration + 1})", "▸")
 
-        response = await _stream_executor_turn(msgs, silent=False)
+        _FINAL_MARKER = "Alright, I'm done"
+        response = await _stream_executor_turn(msgs, silent=False, stop_on=_FINAL_MARKER)
 
         # merge into state manually
         if not state["messages"]:
@@ -834,17 +861,7 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
         else:
             all_msgs = state["messages"] + [response]
         state = {**state, "messages": all_msgs, "iterations": iteration + 1}
-        is_final = not response.tool_calls and "alright, i'm done" in (response.content or "").lower()
-        if is_final and not getattr(response, "_was_silent", False):
-            # discard the streamed output, re-collect silently
-            response = await _stream_executor_turn(msgs, silent=True)
-            response._was_silent = True  # type: ignore
-            if not state["messages"]:
-                all_msgs = msgs + [response]
-            else:
-                all_msgs = state["messages"] + [response]
-            state = {**state, "messages": all_msgs, "iterations": iteration + 1}
-        # ── no tool calls → we're done or need review ───────────────────────
+                # ── no tool calls → we're done or need review ───────────────────────
         if not response.tool_calls:
             if state["complexity"] == "COMPLEX":
                 spinner = Spinner("reviewing…"); spinner.start()
@@ -868,10 +885,23 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
             bar.tool_call(name, primary)
 
         # run tools
-        tool_result_state = tool_node.invoke({"messages": all_msgs}, config)
-        tool_msgs = tool_result_state["messages"]
+        tool_msgs = []
+        tool_map = {t.name: t for t in TOOLS}
+        for tc in response.tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args", {})
+            tid  = tc.get("id") or str(uuid.uuid4())
+            tool = tool_map.get(name)
+            if tool is None:
+                result = f"Error: tool '{name}' not found."
+            else:
+                try:
+                    result = tool.invoke(args)
+                except Exception as e:
+                    result = f"Error: {e}"
+            tool_msgs.append(ToolMessage(content=str(result), tool_call_id=tid, name=name))
         state = {**state, "messages": all_msgs + tool_msgs}
-
+        
         # display tool results
         for tm in tool_msgs:
             if isinstance(tm, ToolMessage):
@@ -882,10 +912,13 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
     # ────────────────────────────────────────────────────────────────────────
     messages = state.get("messages", [])
     last_ai = next(
-        (m for m in reversed(messages) if isinstance(m, AIMessage) and m.content), None
-    )
+    (m for m in reversed(messages) if isinstance(m, AIMessage) and m.content), None
+)
     if last_ai:
-        return last_ai.content
+        content = last_ai.content
+        idx = content.lower().find("alright, i'm done")
+        # send only the "Alright, I'm done —" onwards to the amber box
+        return content[idx:] if idx != -1 else content
 
     tool_results = [m for m in messages if isinstance(m, ToolMessage)]
     if tool_results:
