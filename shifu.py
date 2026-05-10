@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-shifu.py — Shifu Agent + Terminal UI  (v3)
+shifu.py — Shifu Agent + Terminal UI  (v4)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 v2 changes
 ──────────
@@ -27,6 +27,21 @@ v3 changes
   decides YES/NO based on whether personal context would actually help. Pure tool
   tasks ("run this command", "what's the weather") get NO and recall is skipped
   entirely — zero wasted embedding calls. Companion and personal messages get YES.
+
+v4 changes
+──────────
+• HOT MEMORY: two-tier memory architecture.
+    Cold memory  — existing SPADA ChromaDB store (spada_db_shifu), unchanged.
+    Hot memory   — lightweight JSON rolling window (.shifu/hot_memory.json).
+  Hot memory stores exactly 2 things per completed turn:
+    (1) Atomised key facts from the user's input prompt
+    (2) Atomised key facts from the final model output + actions
+  This pair is injected into every executor system prompt for zero-latency
+  immediate context — no embedding lookup, no tool call required.
+• /reset_mem  command: wipe hot memory; cold memory is always untouched.
+• /mem_status command: inspect hot + cold memory side-by-side.
+• Bar.hot_memory_inject() and Bar.hot_memory_store() visual ticks.
+• HOT_MEMORY_MAX_TURNS env var: configurable rolling window (default 15).
 """
 
 # ── stdlib ─────────────────────────────────────────────────────────────────────
@@ -206,7 +221,7 @@ def boot():
     ts = datetime.now().strftime("%A, %d %B %Y  ·  %H:%M")
     _w("  " + C.G + ts + C.R + "\n")
     _dim_line()
-    _w("  " + C.G + "help  ·  history  ·  skills  ·  exit" + C.R + "\n")
+    _w("  " + C.G + "help  ·  history  ·  skills  ·  mem_status  ·  reset_mem  ·  exit" + C.R + "\n")
     _blank()
 
 
@@ -304,6 +319,18 @@ def _load_tools(package) -> list[BaseTool]:
 TOOLS               = _load_tools(tools_pkg)
 tool_node           = ToolNode(TOOLS)
 executor_with_tools = executor_llm.bind_tools(TOOLS)
+
+# ── Hot memory ─────────────────────────────────────────────────────────────
+# Imported after tools load; gracefully disabled if spada_memory isn't present.
+
+try:
+    from tools.spada_memory import hot_memory as _hot_memory
+    from tools.spada_memory import hot_atomise as _hot_atomise
+    _HOT_MEM = True
+except Exception as _hot_import_err:
+    _hot_memory  = None   # type: ignore[assignment]
+    _hot_atomise = None   # type: ignore[assignment]
+    _HOT_MEM     = False
 
 # Tool icons: auto-populated from known names; unknown tools get a sensible default
 _KNOWN_TOOL_ICONS = {
@@ -882,6 +909,22 @@ class Bar:
         snippet = hint[:65] + ("…" if len(hint) > 65 else "")
         self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {C.HINT}◎{C.R}  {C.HINT}memory hint{C.R}  {C.GD}{snippet}{C.R}")
 
+    def hot_memory_inject(self, turns: int):
+        """Show that hot memory was injected into the system prompt."""
+        self._commit(
+            f"  {C.G}{self._elapsed():>6}{C.R}  "
+            f"{C.HINT}◑{C.R}  {C.HINT}hot memory{C.R}  "
+            f"{C.GD}injecting {turns} recent turn(s){C.R}"
+        )
+
+    def hot_memory_store(self, p_atoms: int, r_atoms: int):
+        """Show that hot memory atoms were stored after a mission."""
+        self._commit(
+            f"  {C.G}{self._elapsed():>6}{C.R}  "
+            f"{C.HINT}◑{C.R}  {C.HINT}hot memory{C.R}  "
+            f"{C.GD}stored {p_atoms}+{r_atoms} atoms (prompt+response){C.R}"
+        )
+
     def clarification(self, question: str, answer: str):
         qs  = question[:55] + ("…" if len(question) > 55 else "")
         as_ = answer[:45]   + ("…" if len(answer)   > 45 else "")
@@ -1102,8 +1145,22 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
                 content += f"\n\nUser clarification: {state['clarification_a']}"
             if state.get("needs_memory"):
                 content += "\n\n[SYSTEM NOTE: Memory recall is relevant here. Call spada_recall NOW before responding — do not skip it.]"
+
+            # ── Hot memory injection ────────────────────────────────────────
+            # Build the system content with hot memory block prepended.
+            # Hot memory is zero-latency (no embedding lookup needed) and
+            # gives Shifu immediate awareness of what just happened.
+            hot_block = ""
+            if _HOT_MEM and _hot_memory is not None:
+                hot_block = _hot_memory.as_prompt_block()
+            if hot_block:
+                bar.hot_memory_inject(_hot_memory.count())
+                sys_content = _EXECUTOR_SYS + "\n\n" + hot_block
+            else:
+                sys_content = _EXECUTOR_SYS
+
             msgs: list[BaseMessage] = [
-                SystemMessage(content=_EXECUTOR_SYS),
+                SystemMessage(content=sys_content),
                 HumanMessage(content=content),
             ]
         else:
@@ -1198,6 +1255,18 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
         if not (SKILLS_DIR / skill_name / "SKILL.md").exists():
             _blank()
             await _offer_skill_save(mission, state["plan"])
+
+    # ── hot memory: atomise prompt + response, store pair ───────────────────
+    # Done AFTER skill offer so it doesn't block the user prompt.
+    # Two LLM calls (prompt atom, response atom) run in the background.
+    if _HOT_MEM and _hot_memory is not None and final_text:
+        try:
+            p_atoms = await asyncio.to_thread(_hot_atomise, mission, "prompt")
+            r_atoms = await asyncio.to_thread(_hot_atomise, final_text, "response")
+            _hot_memory.store(p_atoms, r_atoms)
+            bar.hot_memory_store(len(p_atoms), len(r_atoms))
+        except Exception:
+            pass  # hot memory storage is always best-effort
 
     return final_text
 
@@ -1355,6 +1424,47 @@ def show_history():
         _w(f"  {C.G}{i:02d}  {e['t']}{C.R}  {C.W}{q}{C.R}\n")
     _blank()
 
+
+def show_mem_status():
+    _blank(); _dim_line()
+    _w("  " + C.AB + "memory status" + C.R + "\n"); _dim_line()
+
+    # ── Hot memory ────────────────────────────────────────────────────────
+    _w(f"  {C.HINT}◑  HOT MEMORY{C.R}\n")
+    if _HOT_MEM and _hot_memory is not None:
+        stats = _hot_memory.stats()
+        _w(f"  {C.G}   turns stored : {C.W}{stats['turns']}/{stats['max_turns']}{C.R}\n")
+        _w(f"  {C.G}   total atoms  : {C.W}{stats['total_atoms']}{C.R}\n")
+        _w(f"  {C.G}   backed by    : {C.W}{stats['path']}{C.R}\n")
+        _w(f"  {C.GD}   (wipe with /reset_mem){C.R}\n")
+        entries = _hot_memory.preview_entries()
+        if entries:
+            _blank()
+            _w("  " + C.GD + "── recent turns" + C.R + "\n")
+            for e in entries[-5:]:  # show last 5
+                _w(f"  {C.G}  T{e['turn']} [{e['ts']}]{C.R}\n")
+                for a in e["prompt_atoms"]:
+                    _w(f"  {C.GD}    IN  · {C.W}{a}{C.R}\n")
+                for a in e["response_atoms"]:
+                    _w(f"  {C.GD}    OUT · {C.W}{a}{C.R}\n")
+    else:
+        _w(f"  {C.ERR}   unavailable — check tools/spada_memory.py{C.R}\n")
+
+    _blank()
+
+    # ── Cold memory ───────────────────────────────────────────────────────
+    _w(f"  {C.A}◉  COLD MEMORY (SPADA — ChromaDB){C.R}\n")
+    persist_dir = os.getenv("SPADA_PERSIST_DIR", "./spada_db_shifu")
+    collection  = os.getenv("SPADA_COLLECTION",  "shifu_memory")
+    _w(f"  {C.G}   persist dir : {C.W}{persist_dir}{C.R}\n")
+    _w(f"  {C.G}   collection  : {C.W}{collection}{C.R}\n")
+    tool_map = {t.name: t for t in TOOLS}
+    if "spada_recall" in tool_map:
+        _w(f"  {C.OK}   tools loaded : recall · memorise · session_close{C.R}\n")
+    else:
+        _w(f"  {C.ERR}   spada tools not found in tools/{C.R}\n")
+    _blank()
+
 def show_skills():
     skills = _scan_skills()
     _blank(); _dim_line()
@@ -1376,6 +1486,8 @@ def show_help():
         ("history",     "mission log"),
         ("skills",      "list installed skills"),
         ("files",       "supported file types"),
+        ("mem_status",  "hot + cold memory stats and recent turns"),
+        ("reset_mem",   "wipe hot memory (cold memory is untouched)"),
         ("clear / cls", "reset screen"),
         ("exit / quit", "shutdown (saves session memory)"),
         ("<anything>",  "send to shifu"),
@@ -1452,6 +1564,16 @@ async def _main_async():
             show_skills(); continue
         elif cmd in ("files", "filetypes", "supported"):
             show_file_support(); continue
+        elif cmd in ("mem_status", "mem", "memory"):
+            show_mem_status(); continue
+        elif cmd in ("reset_mem", "reset_memory", "clear_mem", "clear_memory"):
+            if _HOT_MEM and _hot_memory is not None:
+                wiped = _hot_memory.clear()
+                _w(f"  {C.OK}✓{C.R}  {C.G}hot memory wiped — {wiped} turn(s) erased.{C.R}\n")
+                _w(f"  {C.GD}  cold memory (spada_db_shifu) is untouched.{C.R}\n")
+            else:
+                _w(f"  {C.ERR}✗{C.R}  {C.G}hot memory not available.{C.R}\n")
+            _blank(); continue
 
         # ── mission ────────────────────────────────────────────────────────
         _blank()
