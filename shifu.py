@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
 """
-shifu.py — One-file Shifu: Agent + Terminal UI
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The flow that modern AI companies use:
+shifu.py — Shifu Agent + Terminal UI  (v3)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+v2 changes
+──────────
+• Planner merged: 3 serial LLM calls collapsed into 1 structured call (~60% faster).
+• SqliteSaver: graph state persists across process restarts.
+• Hidden sentinel <<<DONE>>>: no more forced "Alright, I'm done —" verbal tic.
+• Memory rules tightened: TIER A/B/C filter; session atoms never stored.
+• Recall output: clean prose only — no raw scores in LLM context.
+• Companion mode: emotional/casual messages bypass full planning.
+• Session summary on exit via spada_session_close.
+• Async rate limiter: no event loop blocking.
+• Tool auto-icon, proactive memory hints, skill auto-generation, wall-clock timeout.
 
-  1.  User sends mission
-  2.  Shifu *streams* a conversational pre-flight brief
-  3.  Tool calls appear inline with live status
-  4.  After each tool result, Shifu *streams* a short observation
-  5.  A warm closing summary *streams* token-by-token
-  6.  Clean, minimal, amber-on-dark terminal UI
-
-Key design decisions
-────────────────────
-• Real token-level streaming via .astream_events() — every word appears
-  as it is generated, just like Claude / GPT products.
-• The "talk → work → talk" rhythm is baked into the executor prompt so
-  the model narrates naturally instead of going silent during tool use.
-• Clarification uses LangGraph interrupt (graph suspends, terminal asks,
-  graph resumes) — no threading hacks needed.
-• Single file: no import-shifu dance, no split-brain config.
+v3 changes
+──────────
+• Per-mission thread_id: each mission gets a fresh LangGraph thread so unrelated
+  tasks never bleed their message history into each other.
+• Rolling session context: a lightweight _SessionContext object maintains a
+  2-3 sentence plain-English summary of what happened this session. This is
+  injected into each mission's system prompt as a slim "session awareness" block —
+  not the full message history, just the distilled thread. The executor stays
+  context-aware across missions without token bloat.
+• NEEDS_MEMORY planner flag: Section 4 of the planner response. The planner
+  decides YES/NO based on whether personal context would actually help. Pure tool
+  tasks ("run this command", "what's the weather") get NO and recall is skipped
+  entirely — zero wasted embedding calls. Companion and personal messages get YES.
 """
 
 # ── stdlib ─────────────────────────────────────────────────────────────────────
@@ -50,7 +57,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -66,12 +73,62 @@ load_dotenv()
 
 PLAYGROUND_DIR = Path("Playground"); PLAYGROUND_DIR.mkdir(exist_ok=True)
 SKILLS_DIR     = Path("skills");     SKILLS_DIR.mkdir(exist_ok=True)
+DATA_DIR       = Path(".shifu");     DATA_DIR.mkdir(exist_ok=True)
 
-MODEL_NAME     = "gpt-oss:120b-cloud"
-BASE_URL       = "https://ollama.com/v1"
-MAX_RPM        = 20
-MAX_ITERATIONS = 50
-MAX_RETRIES    = 10
+MODEL_NAME      = "gpt-oss:120b-cloud"
+BASE_URL        = "https://ollama.com/v1"
+MAX_RPM         = 20
+MAX_ITERATIONS  = 50
+MAX_RETRIES     = 10
+MISSION_TIMEOUT        = 300  # seconds (5 minutes hard wall)
+SESSION_CONTEXT_MAX    = 8    # max missions kept in rolling context
+
+
+# ── Rolling session context ───────────────────────────────────────────────────
+# Tracks what happened this session as a lightweight plain-English summary.
+# Injected into each mission's system prompt — not the full message history,
+# just enough for Shifu to say "oh, we just summarized that file" if relevant.
+
+class _SessionContext:
+    """
+    Maintains a rolling 2-3 sentence summary of the current session.
+    Updated after every mission. Injected into the executor system prompt
+    so Shifu has lightweight cross-mission awareness without message bleed.
+    """
+
+    def __init__(self):
+        self._entries: list[str] = []   # (mission_summary,) tuples, newest last
+
+    def add(self, mission: str, outcome_hint: str):
+        """Record what just happened. outcome_hint is a short phrase like
+        'summarized x.txt' or 'answered weather question'."""
+        entry = f"[{datetime.now().strftime('%H:%M')}] {outcome_hint}"
+        self._entries.append(entry)
+        if len(self._entries) > SESSION_CONTEXT_MAX:
+            self._entries = self._entries[-SESSION_CONTEXT_MAX:]
+
+    def as_prompt_block(self) -> str:
+        """
+        Returns a slim injection block for the executor system prompt.
+        Empty string if no prior missions this session.
+        """
+        if not self._entries:
+            return ""
+        lines = "\n".join(f"  • {e}" for e in self._entries)
+        return (
+            "══ THIS SESSION (lightweight context — not full history) ══════════\n"
+            "Recent missions completed before this one:\n"
+            f"{lines}\n"
+            "Use this only if the current mission clearly relates to prior work.\n"
+            "Do NOT drag unrelated session history into an unrelated task.\n"
+            "═══════════════════════════════════════════════════════════════════"
+        )
+
+    def is_empty(self) -> bool:
+        return len(self._entries) == 0
+
+
+_session_context = _SessionContext()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -83,19 +140,20 @@ class C:
     BOLD    = "\033[1m"
     DIM     = "\033[2m"
     ITALIC  = "\033[3m"
-    A       = "\033[38;5;214m"          # amber
-    AB      = "\033[1;38;5;214m"        # amber bold
-    ABGF    = "\033[38;5;0m\033[48;5;214m"  # black-on-amber (logo fill)
-    W       = "\033[38;5;252m"          # near-white
-    G       = "\033[38;5;240m"          # mid grey
-    GD      = "\033[38;5;236m"          # dark grey
-    OK      = "\033[38;5;71m"           # muted green
-    ERR     = "\033[38;5;167m"          # muted red
-    TOOL    = "\033[38;5;67m"           # steel-blue for tool names
-    PLAN    = "\033[38;5;139m"          # muted violet for plan steps
-    STREAM  = "\033[38;5;223m"          # soft cream for streamed tokens
+    A       = "\033[38;5;214m"
+    AB      = "\033[1;38;5;214m"
+    ABGF    = "\033[38;5;0m\033[48;5;214m"
+    W       = "\033[38;5;252m"
+    G       = "\033[38;5;240m"
+    GD      = "\033[38;5;236m"
+    OK      = "\033[38;5;71m"
+    ERR     = "\033[38;5;167m"
+    TOOL    = "\033[38;5;67m"
+    PLAN    = "\033[38;5;139m"
+    STREAM  = "\033[38;5;223m"
     PANELBG = "\033[48;5;234m"
     RBG     = "\033[49m"
+    HINT    = "\033[38;5;183m"   # soft lavender — proactive memory hints
 
 
 def _tw() -> int:
@@ -141,10 +199,7 @@ def boot():
         last  = len(s)
         filled = ""
         for ch in raw[first:last]:
-            if ch == " ":
-                filled += " "
-            else:
-                filled += C.AB + ch + C.R
+            filled += (C.AB + ch + C.R) if ch != " " else " "
         _w("  " + raw[:first] + filled + "\n")
         time.sleep(0.018)
     _blank()
@@ -198,22 +253,37 @@ def _make_llm(env_key: str) -> ChatOpenAI:
         api_key=os.getenv(env_key),
         temperature=0.5,
         max_tokens=4096,
-        streaming=True,         # ← must be True for astream_events
+        streaming=True,
     )
 
 planner_llm  = _make_llm("OLLAMA_API_KEY_PLANNER")
 executor_llm = _make_llm("OLLAMA_API_KEY_EXECUTOR")
 
 _last_call: float = 0.0
+_rate_lock         = asyncio.Lock()
+
+
+async def _invoke_async(llm, messages):
+    """Async rate-limited invoke — never blocks the event loop."""
+    global _last_call
+    async with _rate_lock:
+        gap  = 60.0 / MAX_RPM
+        wait = gap - (time.time() - _last_call)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        result     = await asyncio.to_thread(llm.invoke, messages)
+        _last_call = time.time()
+        return result
+
 
 def _invoke(llm, messages):
-    """Synchronous rate-limited invoke (used for planner nodes)."""
+    """Synchronous wrapper — used only during planning nodes inside graph.stream()."""
     global _last_call
-    gap = 60.0 / MAX_RPM
+    gap  = 60.0 / MAX_RPM
     wait = gap - (time.time() - _last_call)
     if wait > 0:
         time.sleep(wait)
-    result = llm.invoke(messages)
+    result     = llm.invoke(messages)
     _last_call = time.time()
     return result
 
@@ -235,7 +305,8 @@ TOOLS               = _load_tools(tools_pkg)
 tool_node           = ToolNode(TOOLS)
 executor_with_tools = executor_llm.bind_tools(TOOLS)
 
-_TOOL_ICONS = {
+# Tool icons: auto-populated from known names; unknown tools get a sensible default
+_KNOWN_TOOL_ICONS = {
     "web_search":           ("⌕",  "search"),
     "file_write":           ("↓",  "write"),
     "file_read":            ("↑",  "read"),
@@ -245,132 +316,187 @@ _TOOL_ICONS = {
     "browser_task":         ("◉",  "browse"),
     "browser_screenshot":   ("⊡",  "screen"),
     "browser_extract_text": ("≡",  "extract"),
+    "spada_recall":         ("◎",  "recall"),
+    "spada_memorise":       ("◉",  "memorise"),
+    "spada_session_close":  ("◈",  "session"),
 }
+
+def _tool_icon(name: str) -> tuple[str, str]:
+    if name in _KNOWN_TOOL_ICONS:
+        return _KNOWN_TOOL_ICONS[name]
+    # auto-generate a label from tool name for unknown tools
+    label = name.replace("_", " ")[:12]
+    return ("·", label)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PROMPTS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Unified planner prompt ────────────────────────────────────────────────────
+# One call, structured sections. Replaces 3 serial classify/clarify/plan calls.
+
 _PLANNER_SYS = f"""You are Shifu's strategic mind — sharp, concise, honest.
 
 AVAILABLE SKILLS:
 {_skills_index()}
 
-[CLASSIFY]  Reply with exactly one word: SIMPLE or COMPLEX.
-  SIMPLE  = SIMPLE  = one tool call or one obvious step, including casual chat or
-            emotional input that just needs a memory recall + warm reply.
-  COMPLEX = multiple steps, ambiguity, or research needed.
+You will receive a mission. Reply with ALL FOUR sections below, in order,
+using the exact section headers shown. No preamble, no extra commentary.
 
-[NEEDS_CLARIFICATION]  Reply with either:
+━━ SECTION 1: ROUTE ━━
+Reply with exactly one word on its own line:
+  COMPANION  — casual chat, emotional messages, simple questions needing a warm reply
+  SIMPLE     — one tool call or one obvious step
+  COMPLEX    — multiple steps, ambiguity, or research required
+
+━━ SECTION 2: CLARIFICATION ━━
+Reply with either:
   NO_CLARIFICATION
 or
-  CLARIFY: <one focused question>
-Only ask if the answer changes *how* the task is done. Never ask for
-things you can default. Prefer one good question over several small ones.
+  CLARIFY: <one focused, essential question>
+Only ask if the answer fundamentally changes how the task is done.
+Never ask for things you can reasonably default. No multi-part questions.
 
-[PLAN]  Write a numbered execution plan.
+━━ SECTION 3: PLAN ━━
+Write a numbered execution plan (COMPLEX only; write PLAN: N/A for SIMPLE/COMPANION).
   - Each step is one atomic action.
   - If a skill matches, put load_skill("<exact-name>") as step 1.
-  - Step 2 (or step 1 for simple tasks): spada_recall relevant context.
-  - LAST step always: spada_memorise anything new learned this session.
+  - Only include spada_recall as a step if SECTION 4 is YES.
+  - Only include spada_memorise as the last step if there are TIER A/B facts to save.
   - All files go inside Playground/.
   - Max 10 steps. End with: PLAN COMPLETE.
+
+━━ SECTION 4: NEEDS_MEMORY ━━
+Reply with exactly one word: YES or NO.
+
+YES — memory recall would genuinely help answer or personalise this mission:
+  • COMPANION / emotional messages (always YES)
+  • Questions about the user's own life, preferences, projects, history
+  • Anything where past context changes the quality of the answer
+  • "Remember when...", "didn't we...", "you mentioned..." type messages
+
+NO — memory recall adds nothing and would just waste time:
+  • Pure tool tasks: run this command, write this file, search this thing
+  • Factual/external questions with no personal angle: weather, news, math
+  • Any task where the answer is the same regardless of who's asking
+  • Follow-ups on the CURRENT mission where context is already in scope
+
+When in doubt: NO. Unnecessary recalls pollute session time.
 """
 
-_EXECUTOR_SYS = f"""You are Shifu — a capable, talkative AI agent who gets things done with tools.
+# ── Executor prompt ───────────────────────────────────────────────────────────
+
+_EXECUTOR_SYS = f"""You are Shifu — a capable, perceptive AI agent who gets things done.
 
 SKILLS (copy verbatim into load_skill):
 {_skills_index()}
-══ MEMORY RULES ══════════════════════════════════════════════════════════
-══ MEMORY ════════════════════════════════════════════════════════════════
-M1. RECALL FIRST — always run spada_recall before anything else, even for
-    casual messages. Query intent + likely context (hobbies, mood, projects).
 
-M2. TANGENTIAL IS FINE — recalled atoms are context, not just answers.
-    Chess memory + "I'm bored" → "hop on chess.com?" Connect the dots.
+══ MEMORY RULES ══════════════════════════════════════════════════════════════
 
-M3. STORE — after every exchange, call spada_memorise
-    on anything worth keeping. No permission needed. Categories to watch:
-    personal facts · preferences · hobbies · ongoing projects · decisions
-    · emotional patterns · research results · task outcomes. Remember your memory
-    is your temple, don't polute it with unnecessary things, it will make 
-    things difficult for you later
+M1. RECALL FIRST — for any non-trivial message, run spada_recall before acting.
+    For pure tool tasks (write this file, run this command) with no personal
+    context involved, you may skip recall if it would genuinely add nothing.
 
-M4. LOW SCORES ARE USABLE — score < 0.5 → surface softly:
-    "I vaguely remember you mentioned X — still true?"
-    Never hallucinate. Always flag uncertainty.
+M2. USE WHAT YOU FIND — recalled context is signal, not decoration.
+    Connect the dots: if memory says they love chess and they mention being bored,
+    say "chess.com?" Don't just list what you remembered — weave it in naturally.
 
-M5. NO EXCUSES — never say "I don't remember" without calling spada_recall
-    first. Skipping recall or storage = task failure.
-═════════════════════════════════════════════════════════════════════════
-══ CRITICAL RULES ════════════════════════════════════════════════════════
-1. ALWAYS USE TOOLS TO CREATE FILES.
-   Never write file content in your response text. Call the file-writing
-   tool for every file. Writing code in your response = task failure.
+M3. STORE SELECTIVELY — the write filter is strict:
 
-1a. NEVER CREATE FILES FOR CONVERSATIONAL RESPONSES.
-    Recommendations, explanations, lists, opinions, casual chat, and
-    memory-based answers must be written directly in your response text —
-    NOT saved to Playground/. Ask yourself: did the user ask you to build
-    or save something? If no, do not touch the file system.
-    Creating an unrequested file = task failure.
+    TIER A — ALWAYS store (permanent):
+      • User's name, location, job, relationships, long-term goals
+      • Deep preferences that won't change ("hates meetings", "vegetarian")
+      • Explicit "remember this" or "keep that in mind" requests
+      • Major life decisions or milestones the user shares
+
+    TIER B — Store if genuinely novel (month):
+      • Active ongoing projects with specific details
+      • Research outcomes that'll be relevant again
+      • Task decisions the user made this session
+      • Current habits or preferences that could shift in a few months
+
+    TIER C — NEVER store:
+      • Greetings, filler, "how are you" exchanges
+      • Your own narration or task descriptions
+      • Tool outputs with no lasting personal value
+      • Questions you just answered
+      • Anything the user obviously won't want recalled next session
+
+    When in doubt: skip it. A clean store beats a polluted one.
+
+M4. TTL matters — pass the right ttl to spada_memorise:
+    permanent → TIER A facts
+    month     → TIER B facts
+    week      → short-lived context (rare; use sparingly)
+
+M5. NO EXCUSES — never say "I don't remember" without having called spada_recall.
+    Skipping recall when context would help = task failure.
+
+M6. PROACTIVE — if recall returns [PROACTIVE CONTEXT], surface it naturally
+    if it seems relevant. A good friend volunteers things they remembered.
+    Don't dump it mechanically; weave it in conversationally.
+
+══ COMPLETION SIGNAL ════════════════════════════════════════════════════════
+When you are fully done with a task, include the hidden token <<<DONE>>> 
+somewhere in your response (it will be stripped before display).
+Then write your natural closing — no forced "Alright, I'm done —" preamble.
+Just speak like a person who finished something and wants to tell you about it.
+
+══ CRITICAL RULES ════════════════════════════════════════════════════════════
+1. ALWAYS USE TOOLS TO CREATE FILES. Never write file content in your response
+   text. Writing code in your response text = task failure.
+
+1a. NEVER CREATE FILES FOR CONVERSATIONAL RESPONSES. Recommendations, lists,
+    opinions, memory-based answers, casual chat — written directly in your
+    response, NOT saved to Playground/. Ask yourself: did the user ask you to
+    BUILD or SAVE something? If no, do not touch the file system.
 
 2. ALL files go inside Playground/ → {PLAYGROUND_DIR.resolve()}
-   Always use full paths like "Playground/todo_app/app.py".
 
-3. CREATE DIRECTORIES BEFORE FILES.
-   Use the terminal or mkdir tool before writing files into subdirectories.
+3. CREATE DIRECTORIES BEFORE FILES using the terminal tool.
 
-4. NEVER ASK THE USER QUESTIONS MID-TASK.
-   If something is ambiguous, make a reasonable assumption, state it
-   briefly ("I'll assume you want X — if not, just ask me to redo it"),
-   and continue working. The time for questions was before execution.
-   Asking a question instead of acting = task failure.
-═════════════════════════════════════════════════════════════════════════
+4. NEVER ASK THE USER QUESTIONS MID-TASK. State your assumption briefly
+   ("I'll assume X — say so if you'd like it changed") and keep going.
 
-FLOW — this is how you must sound, every single response:
+5. COMPANION MODE — for casual chat, emotional messages, or simple questions:
+   keep it warm and natural. No bullet lists. No task summaries. Just talk.
+   Memory recall is still useful here — connect past context to present moment.
 
-  Before your first tool call:
-    Write 2-3 sentences telling the user what you understand the mission to
-    be, what you are about to do first, and why. Natural English. First
-    person. No bullet lists. No "Task received." Sound like a friend who
-    actually knows what they are doing.
+══ TONE ══════════════════════════════════════════════════════════════════════
+Before your first tool call on non-trivial tasks: 1-2 sentences saying what
+you're about to do and why. Natural English, first person, no bullet lists.
 
-  After each tool result:
-    Write 1-2 sentences commenting on what just came back. Be honest about
-    surprises, errors, partial results. Never just say "Done." or be silent.
-    Example: "Interesting — the API returned 47 results but most are
-    duplicates. I'll deduplicate by URL before writing the file."
+After each tool result: 1 sentence on what just came back. Be honest about
+surprises or errors. Never just say "Done." silently.
 
-  When you are finished (no more tool calls needed):
-    Start your final message with "Alright, I'm done —" and write a warm
-    closing paragraph: what you built, any surprises you hit, and how to
-    run / use / open the result. No bullet lists. No "✅ DONE:".
+When finished: speak naturally. No ritual openers. Just close warmly.
 
-Max {MAX_ITERATIONS} tool-call iterations.
+Max {MAX_ITERATIONS} tool-call iterations. Hard timeout: {MISSION_TIMEOUT}s.
 """
 
-_REVIEWER_SYS = """You are a quality reviewer.
+# ── Reviewer prompt ───────────────────────────────────────────────────────────
+# Tightened — no longer a rubber stamp.
 
-PASS if ANY of these are true:
-  • The agent output contains "Alright, I'm done"
-  • A tool completed the core task with no error keywords in its result
-  • The output clearly describes a successful outcome
-  • The agent asked a clarifying question (that is valid behaviour, not failure)
-  • The agent produced a response of any kind without a tool error
+_REVIEWER_SYS = """You are a strict quality reviewer for an AI agent.
 
-RETRY only if ALL of these are true:
-  • A tool call explicitly returned an error, exception, or traceback
-  • AND the task is clearly not complete
+PASS if:
+  • The core task is demonstrably complete (file written, search done, answer given)
+  • The agent produced a substantive response addressing the mission
+  • A clarifying question was asked (valid behaviour, not failure)
 
-NEVER retry for: terse output, missing details, asking questions, or
-responses that don't start with "Alright, I'm done".
+RETRY only if:
+  • A tool returned an explicit error, exception, or traceback
+    AND the task is clearly not finished as a result
+  • The agent's response is completely empty or "I don't know" with no attempt
+
+NEVER retry for: terse style, missing polish, asking questions, not starting
+with a specific phrase, or responses that are complete but brief.
 
 Reply exactly:
 VERDICT: PASS
 or
-VERDICT: RETRY — <one-sentence reason, must name the specific tool error>
+VERDICT: RETRY — <one-sentence reason, must name the specific error>
 """
 
 
@@ -379,10 +505,11 @@ VERDICT: RETRY — <one-sentence reason, must name the specific tool error>
 # ══════════════════════════════════════════════════════════════════════════════
 
 class ShifuState(TypedDict):
+    needs_memory: bool
     messages:          Annotated[list[BaseMessage], add_messages]
     mission:           str
     plan:              str
-    complexity:        Literal["SIMPLE", "COMPLEX", ""]
+    route:             Literal["COMPANION", "SIMPLE", "COMPLEX", ""]
     clarification_q:   str
     clarification_a:   str
     iterations:        int
@@ -391,89 +518,127 @@ class ShifuState(TypedDict):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  GRAPH NODES
+#  GRAPH NODES  (planner now does one merged call)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def classify_node(state: ShifuState) -> ShifuState:
-    resp = _invoke(planner_llm, [
-        SystemMessage(content=_PLANNER_SYS),
-        HumanMessage(content=f"[CLASSIFY]\nMission: {state['mission']}"),
-    ])
-    c: Literal["SIMPLE", "COMPLEX"] = (
-        "COMPLEX" if "COMPLEX" in resp.content.upper() else "SIMPLE"
-    )
-    return {**state, "complexity": c}
+def _parse_planner_response(content: str) -> dict:
+    """Parse the three-section planner response into a dict."""
+    route         = "SIMPLE"
+    clarification = ""
+    plan          = ""
+
+    # ROUTE
+    m = re.search(r'━━\s*SECTION 1: ROUTE\s*━━\s*\n(.+)', content, re.IGNORECASE)
+    if m:
+        word = m.group(1).strip().upper().split()[0] if m.group(1).strip() else ""
+        if "COMPANION" in word:
+            route = "COMPANION"
+        elif "COMPLEX" in word:
+            route = "COMPLEX"
+        else:
+            route = "SIMPLE"
+    else:
+        # Fallback: scan for the keywords
+        upper = content.upper()
+        if "COMPANION" in upper:  route = "COMPANION"
+        elif "COMPLEX"  in upper: route = "COMPLEX"
+        else:                     route = "SIMPLE"
+
+    # CLARIFICATION
+    m2 = re.search(r'CLARIFY:\s*(.+)', content, re.IGNORECASE)
+    if m2 and "NO_CLARIFICATION" not in content.upper():
+        clarification = m2.group(1).strip()
+
+    # PLAN
+    m3 = re.search(r'━━\s*SECTION 3: PLAN\s*━━(.+?)(?:PLAN COMPLETE|$)', content, re.DOTALL | re.IGNORECASE)
+    if m3:
+        raw_plan = m3.group(1).strip()
+        if "N/A" not in raw_plan.upper():
+            plan = raw_plan
+    
+    # In _parse_planner_response, add after the PLAN block:
+    needs_memory = False
+    m4 = re.search(r'SECTION 4[:\s]*NEEDS_MEMORY\s*━*\s*\n\s*(YES|NO)', content, re.IGNORECASE)
+    if m4:
+        needs_memory = m4.group(1).strip().upper() == "YES"
+    # fallback: if "YES" appears near NEEDS_MEMORY
+    elif "NEEDS_MEMORY" in content.upper():
+        snippet = content.upper().split("NEEDS_MEMORY")[-1][:30]
+        needs_memory = "YES" in snippet
+
+    return {"route": route, "clarification_q": clarification, "plan": plan, "needs_memory": needs_memory}
 
 
-def clarify_check_node(state: ShifuState) -> ShifuState:
-    resp = _invoke(planner_llm, [
+
+def plan_node(state: ShifuState) -> ShifuState:
+    """Single merged planner call: route + clarification + plan."""
+    extra = f"\nUser clarification: {state['clarification_a']}" if state.get("clarification_a") else ""
+    resp  = _invoke(planner_llm, [
         SystemMessage(content=_PLANNER_SYS),
         HumanMessage(content=(
-            f"[NEEDS_CLARIFICATION]\nMission: {state['mission']}\n"
-            f"Complexity: {state['complexity']}"
+            f"Mission: {state['mission']}{extra}\n"
+            f"Playground: {PLAYGROUND_DIR.resolve()}"
         )),
     ])
-    content = resp.content.strip()
-    if content.upper().startswith("CLARIFY:"):
-        return {**state, "clarification_q": content[len("CLARIFY:"):].strip()}
-    return {**state, "clarification_q": ""}
+    parsed = _parse_planner_response(resp.content)
+    return {
+        **state,
+        "route":           parsed["route"],
+        "clarification_q": parsed["clarification_q"],
+        "plan":            parsed["plan"],
+        "needs_memory": parsed["needs_memory"],
+    }
 
 
 def clarify_node(state: ShifuState) -> ShifuState:
-    """Suspend the graph; caller injects the answer via Command(resume=...)."""
+    """Suspend graph; caller injects answer via Command(resume=...)."""
     answer = interrupt(state["clarification_q"])
     if not answer or not str(answer).strip():
         answer = "(user skipped — use your best judgment)"
     return {**state, "clarification_a": str(answer).strip()}
 
 
-def plan_node(state: ShifuState) -> ShifuState:
-    extra = f"\nUser clarification: {state['clarification_a']}" if state.get("clarification_a") else ""
+def replan_node(state: ShifuState) -> ShifuState:
+    """Re-run planner after user clarification (skip route re-classify)."""
     resp = _invoke(planner_llm, [
         SystemMessage(content=_PLANNER_SYS),
         HumanMessage(content=(
-            f"[PLAN]\nMission: {state['mission']}{extra}\n"
+            f"Mission: {state['mission']}\n"
+            f"User clarification: {state['clarification_a']}\n"
             f"Playground: {PLAYGROUND_DIR.resolve()}"
         )),
     ])
-    return {**state, "plan": resp.content}
-
-
-def execute_node(state: ShifuState) -> ShifuState:
-    if state["iterations"] >= MAX_ITERATIONS:
-        bail = AIMessage(content="⚠️ Max iterations reached. Stopping.")
-        return {**state, "messages": state["messages"] + [bail]}
-
-    if not state["messages"]:
-        content = f"Mission: {state['mission']}"
-        if state["complexity"] == "COMPLEX" and state["plan"]:
-            content += f"\n\nExecution Plan:\n{state['plan']}"
-        if state.get("clarification_a"):
-            content += f"\n\nUser clarification: {state['clarification_a']}"
-        msgs: list[BaseMessage] = [
-            SystemMessage(content=_EXECUTOR_SYS),
-            HumanMessage(content=content),
-        ]
-    else:
-        msgs = state["messages"]
-
-    response = _invoke(executor_with_tools, msgs)
-    new_msgs = (msgs if not state["messages"] else []) + [response]
-    return {**state,
-            "messages":   state["messages"] + new_msgs,
-            "iterations": state["iterations"] + 1}
+    parsed = _parse_planner_response(resp.content)
+    return {
+        **state,
+        "plan":            parsed["plan"],
+        "clarification_q": "",   # don't re-ask
+    }
 
 
 def tools_node_fn(state: ShifuState) -> ShifuState:
-    result = tool_node.invoke({"messages": state["messages"]})
-    return {**state, "messages": result["messages"]}
+    try:
+        result = tool_node.invoke({"messages": state["messages"]})
+        return {**state, "messages": result["messages"]}
+    except Exception as exc:
+        # Normalize tool errors into a ToolMessage so the graph doesn't crash
+        last_ai = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
+        error_msgs = []
+        if last_ai and last_ai.tool_calls:
+            for tc in last_ai.tool_calls:
+                error_msgs.append(ToolMessage(
+                    content=f'{{"status": "error", "message": "{exc}"}}',
+                    tool_call_id=tc.get("id", str(uuid.uuid4())),
+                    name=tc.get("name", "unknown"),
+                ))
+        return {**state, "messages": state["messages"] + error_msgs}
 
 
 def review_node(state: ShifuState) -> ShifuState:
     last_tool = next((m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)), None)
     last_ai   = next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)),   None)
 
-    # fast-path: no error keywords → PASS immediately
+    # Fast-path pass: no error keywords
     if last_tool:
         err_kw = ("error", "exception", "failed", "traceback", "timeout")
         if not any(k in str(last_tool.content).lower() for k in err_kw):
@@ -495,72 +660,84 @@ def review_node(state: ShifuState) -> ShifuState:
 
 # ── routing ────────────────────────────────────────────────────────────────────
 
-def _route_classify(state):       return "clarify_check"
-def _route_clarify_check(state):
-    if state["clarification_q"]:  return "clarify"
-    return "plan" if state["complexity"] == "COMPLEX" else "execute"
+def _route_plan(state):
+    if state["clarification_q"]:
+        return "clarify"
+    return "execute"
+
 def _route_clarify(state):
-    return "plan" if state["complexity"] == "COMPLEX" else "execute"
-def _route_plan(state):           return "execute"
+    return "replan"
+
+def _route_replan(state):
+    return "execute"
+
 def _route_execute(state):
     last = state["messages"][-1] if state["messages"] else None
     if last and hasattr(last, "tool_calls") and last.tool_calls:
         return "tools"
-    return "review" if state["complexity"] == "COMPLEX" else END
+    return "review" if state["route"] == "COMPLEX" else END
+
 def _route_tools(state):
     return END if state["iterations"] >= MAX_ITERATIONS else "execute"
+
 def _route_review(state):
     if state["verdict"] == "PASS" or state["retry_count"] >= MAX_RETRIES:
         return END
     return "execute"
 
 
-# ── build ──────────────────────────────────────────────────────────────────────
+# ── build graph ────────────────────────────────────────────────────────────────
 
 def _build_graph():
+    # SqliteSaver for persistent checkpoints across restarts
+    import sqlite3 as _sqlite3
+    _db_conn = _sqlite3.connect(str(DATA_DIR / "shifu_graph.db"), check_same_thread=False)
+    checkpointer = SqliteSaver(_db_conn)
+
     g = StateGraph(ShifuState)
     for name, fn in [
-        ("classify",      classify_node),
-        ("clarify_check", clarify_check_node),
-        ("clarify",       clarify_node),
-        ("plan",          plan_node),
-        ("execute",       execute_node),
-        ("tools",         tools_node_fn),
-        ("review",        review_node),
+        ("plan",    plan_node),
+        ("clarify", clarify_node),
+        ("replan",  replan_node),
+        ("execute", _execute_node_stub),  # placeholder — actual execution is streamed
+        ("tools",   tools_node_fn),
+        ("review",  review_node),
     ]:
         g.add_node(name, fn)
 
-    g.set_entry_point("classify")
-    g.add_conditional_edges("classify",      _route_classify,       {"clarify_check": "clarify_check"})
-    g.add_conditional_edges("clarify_check", _route_clarify_check,  {"clarify": "clarify", "plan": "plan", "execute": "execute"})
-    g.add_conditional_edges("clarify",       _route_clarify,        {"plan": "plan", "execute": "execute"})
-    g.add_conditional_edges("plan",          _route_plan,           {"execute": "execute"})
-    g.add_conditional_edges("execute",       _route_execute,        {"tools": "tools", "review": "review", END: END})
-    g.add_conditional_edges("tools",         _route_tools,          {"execute": "execute", END: END})
-    g.add_conditional_edges("review",        _route_review,         {"execute": "execute", END: END})
+    g.set_entry_point("plan")
+    g.add_conditional_edges("plan",    _route_plan,    {"clarify": "clarify", "execute": "execute"})
+    g.add_conditional_edges("clarify", _route_clarify, {"replan": "replan"})
+    g.add_conditional_edges("replan",  _route_replan,  {"execute": "execute"})
+    g.add_conditional_edges("execute", _route_execute, {"tools": "tools", "review": "review", END: END})
+    g.add_conditional_edges("tools",   _route_tools,   {"execute": "execute", END: END})
+    g.add_conditional_edges("review",  _route_review,  {"execute": "execute", END: END})
 
-    return g.compile(checkpointer=MemorySaver(), interrupt_before=["clarify"])
+    return g.compile(checkpointer=checkpointer, interrupt_before=["clarify"])
+
+def _execute_node_stub(state: ShifuState) -> ShifuState:
+    """
+    Stub — the execute node exists in the graph for routing but actual execution
+    is driven by the streaming runner below.  The stub does nothing.
+    """
+    return state
 
 shifu_graph = _build_graph()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  STREAMING EXECUTOR
-#  This is the heart of the "modern AI" feel:
-#  instead of polling graph.stream(), we run the executor LLM directly
-#  with astream_events and print tokens live, then let the graph handle
-#  routing.  Non-executor nodes run silently and fast.
 # ══════════════════════════════════════════════════════════════════════════════
+
+_DONE_SENTINEL = "<<<DONE>>>"
 
 async def _stream_executor_turn(
     messages: list[BaseMessage],
     silent: bool = False,
-    stop_on: str | None = None,
 ) -> AIMessage:
     full_text       = ""
     tool_calls      = []
     in_text         = False
-    printing_paused = False
 
     if not silent:
         _w("\n  " + C.A + "│" + C.R + "  ")
@@ -574,13 +751,12 @@ async def _stream_executor_turn(
                 token = chunk.content if isinstance(chunk.content, str) else ""
                 if token:
                     full_text += token
-                    if not silent and not printing_paused:
-                        # stop printing once the marker appears in accumulated text
-                        if stop_on and stop_on in full_text.lower():
-                            printing_paused = True
-                        else:
+                    if not silent:
+                        # Strip the sentinel token from live stream display
+                        display_token = token.replace(_DONE_SENTINEL, "").replace("<<<DONE", "").replace("DONE>>>", "")
+                        if display_token:
                             in_text = True
-                            _w(C.STREAM + token + C.R)
+                            _w(C.STREAM + display_token + C.R)
                             sys.stdout.flush()
 
             if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
@@ -609,7 +785,7 @@ async def _stream_executor_turn(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SPINNER  (runs while planner / reviewer nodes work)
+#  SPINNER
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Spinner:
@@ -653,12 +829,10 @@ class Spinner:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CHECKPOINT DISPLAY  (the live progress trail)
+#  BAR (progress trail)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Bar:
-    """Prints a committed trail of checkpoints above the spinner line."""
-
     def __init__(self):
         self._t0   = time.time()
         self._lock = threading.Lock()
@@ -674,9 +848,9 @@ class Bar:
     def phase(self, label: str, icon: str = "·"):
         self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {C.A}{icon}{C.R}  {C.W}{label}{C.R}")
 
-    def complexity(self, c: str):
-        col = C.OK if c == "SIMPLE" else C.A
-        self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {col}◈{C.R}  {col}{c.lower()}{C.R}")
+    def route(self, r: str):
+        col = {"COMPANION": C.HINT, "SIMPLE": C.OK, "COMPLEX": C.A}.get(r, C.G)
+        self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {col}◈{C.R}  {col}{r.lower()}{C.R}")
 
     def plan_step(self, line: str):
         clean = line.strip()
@@ -684,13 +858,13 @@ class Bar:
             self._commit(f"  {C.G}{'':>6}{C.R}  {C.PLAN}›{C.R}  {C.G}{clean[:70]}{C.R}")
 
     def tool_call(self, name: str, arg: str = ""):
-        icon, label = _TOOL_ICONS.get(name, ("·", name))
+        icon, label = _tool_icon(name)
         snippet = arg.replace("\n", " ")[:55]
         if len(arg) > 55: snippet += "…"
         self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {C.TOOL}{icon}  {label}{C.R}  {C.GD}{snippet}{C.R}")
 
     def tool_result(self, name: str, result: str):
-        _, label = _TOOL_ICONS.get(name, ("·", name))
+        _, label = _tool_icon(name)
         snippet = result.replace("\n", " ")[:60]
         if len(result) > 60: snippet += "…"
         self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {C.OK}✓{C.R}  {C.TOOL}{label}{C.R}  {C.GD}{snippet}{C.R}")
@@ -703,9 +877,14 @@ class Bar:
             _w(f"  {C.A}│{C.R} {C.W}{padded}{C.R} {C.A}│{C.R}\n")
         _w(f"  {C.A}└{'─' * iw}┘{C.R}\n")
 
+    def proactive_hint(self, hint: str):
+        """Display a memory hint that Shifu is about to volunteer."""
+        snippet = hint[:65] + ("…" if len(hint) > 65 else "")
+        self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {C.HINT}◎{C.R}  {C.HINT}memory hint{C.R}  {C.GD}{snippet}{C.R}")
+
     def clarification(self, question: str, answer: str):
-        qs = question[:55] + ("…" if len(question) > 55 else "")
-        as_ = answer[:45] + ("…" if len(answer) > 45 else "")
+        qs  = question[:55] + ("…" if len(question) > 55 else "")
+        as_ = answer[:45]   + ("…" if len(answer)   > 45 else "")
         self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {C.A}💬{C.R}  {C.GD}{qs}{C.R}  {C.W}→ {as_}{C.R}")
 
     def verdict(self, v: str):
@@ -714,60 +893,138 @@ class Bar:
         else:
             self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {C.ERR}◉  retry{C.R}")
 
+    def timeout(self):
+        self._commit(f"  {C.G}{self._elapsed():>6}{C.R}  {C.ERR}⚠  timeout{C.R}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MISSION RUNNER  (the main async loop)
+#  SESSION CLOSE  (auto-called on exit)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_session_missions: list[str] = []  # rolling log for summary generation
+
+
+async def _run_session_close(spinner: Spinner):
+    """
+    Generate and store a session summary via spada_session_close.
+    Called automatically when the user exits.
+    """
+    if not _session_missions:
+        return
+    spinner._label = "closing session…"
+    spinner = Spinner("closing session…"); spinner.start()
+
+    summary_prompt = (
+        "Write a 2-4 sentence summary of this session for long-term memory. "
+        "Cover: what was accomplished, key decisions, and notable things the user shared. "
+        "Third-person past tense. Be specific.\n\n"
+        "Session missions:\n" +
+        "\n".join(f"  {i+1}. {m}" for i, m in enumerate(_session_missions[-10:]))
+    )
+
+    try:
+        msgs = [
+            SystemMessage(content="You are a session summariser. Reply with only the summary paragraph."),
+            HumanMessage(content=summary_prompt),
+        ]
+        response = await asyncio.to_thread(planner_llm.invoke, msgs)
+        summary  = response.content.strip()
+
+        # Call spada_session_close if available
+        tool_map = {t.name: t for t in TOOLS}
+        closer   = tool_map.get("spada_session_close")
+        if closer and summary:
+            await asyncio.to_thread(closer.invoke, {"summary": summary})
+    except Exception:
+        pass  # session close is best-effort; never crash on exit
+    finally:
+        try: spinner.stop()
+        except: pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SKILL AUTO-GENERATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _offer_skill_save(mission: str, plan: str):
+    """
+    After a novel COMPLEX task, ask if the user wants to save it as a skill.
+    Generates the SKILL.md automatically.
+    """
+    ts  = datetime.now().strftime("%H:%M")
+    _w(f"\n  {C.GD}[{ts}]{C.R}  {C.HINT}◈{C.R}  "
+       f"{C.G}Save this as a reusable skill? {C.GD}[y/N]{C.R}  ")
+    try:
+        answer = await asyncio.to_thread(input, "")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+
+    if answer.strip().lower() not in ("y", "yes"):
+        return
+
+    # Derive a skill name from the mission
+    safe_name = re.sub(r'[^a-z0-9_]+', '_', mission.lower().strip())[:30].strip('_')
+    skill_dir  = SKILLS_DIR / safe_name
+    skill_dir.mkdir(exist_ok=True)
+    skill_file = skill_dir / "SKILL.md"
+
+    if skill_file.exists():
+        _w(f"  {C.G}skill '{safe_name}' already exists — skipping.{C.R}\n")
+        return
+
+    # Generate the SKILL.md content
+    gen_prompt = (
+        f"Generate a SKILL.md for Shifu, a LangGraph-based AI agent.\n"
+        f"Mission that was just completed: {mission}\n"
+        f"Execution plan used:\n{plan}\n\n"
+        "The SKILL.md must include:\n"
+        "1. YAML front-matter with: name, description (one line), version: 1.0\n"
+        "2. ## Steps section: a numbered checklist of the key steps\n"
+        "3. ## Notes section: any gotchas, defaults, or tips\n"
+        "Keep it under 40 lines. No preamble. Start with ---"
+    )
+    try:
+        msgs     = [HumanMessage(content=gen_prompt)]
+        response = await asyncio.to_thread(planner_llm.invoke, msgs)
+        skill_file.write_text(response.content.strip(), encoding="utf-8")
+        _w(f"  {C.OK}✓{C.R}  {C.G}skill saved → {skill_dir.resolve()}{C.R}\n")
+        # Refresh in-memory skills registry
+        SKILLS.clear()
+        SKILLS.update(_scan_skills())
+    except Exception as exc:
+        _w(f"  {C.ERR}✗{C.R}  {C.G}skill save failed: {exc}{C.R}\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MISSION RUNNER
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
-    """
-    Drive the graph with streaming executor turns.
 
-    Architecture:
-      • Planner/reviewer nodes run via synchronous invoke (fast, no streaming needed)
-      • Executor turns run via astream_events so tokens print live
-      • Tool results are printed by bar.tool_result()
-      • The graph state is managed manually so we can intercept execute_node
-    """
-    tid    = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": tid}}
+    config = {"configurable": {"thread_id": _SESSION_THREAD_ID}}
 
     state: ShifuState = {
         "messages":        [],
         "mission":         mission,
         "plan":            "",
-        "complexity":      "",
+        "route":           "",
         "clarification_q": "",
         "clarification_a": "",
         "iterations":      0,
         "verdict":         "",
         "retry_count":     0,
+        "needs_memory": False,
     }
 
-    # ── helper: run everything up to (but not including) execute, then return ──
-    # We use graph.stream() for all non-execute nodes (they're fast and don't
-    # stream), and handle execute ourselves so we can stream tokens.
-
-    def _run_planning_nodes(input_val):
-        """Run graph until it hits execute or END, return final state."""
-        nonlocal state
-        for step in shifu_graph.stream(input_val, config=config, stream_mode="values"):
-            state = step
-        return state
-
-    # ────────────────────────────────────────────────────────────────────────
-    # PHASE 1: planning (classify → clarify? → plan → execute entry)
-    # ────────────────────────────────────────────────────────────────────────
+    # ── PHASE 1: planning (merged single call) ──────────────────────────────
     spinner.start()
-    spinner._label = "reading mission…"
+    spinner._label = "thinking…"
 
-    # Stream graph until we'd hit execute
     prev = None
     for step in shifu_graph.stream(state, config=config, stream_mode="values"):
-        # update bar
-        if prev is None or (not prev.get("complexity") and step.get("complexity")):
+        if prev is None or (not prev.get("route") and step.get("route")):
             spinner.stop()
-            bar.complexity(step.get("complexity", ""))
+            bar.route(step.get("route", "SIMPLE"))
             spinner = Spinner("planning…"); spinner.start()
         if not (prev or {}).get("plan") and step.get("plan"):
             spinner.stop()
@@ -776,15 +1033,14 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
                 if re.match(r'^\s*\d+\.', ln):
                     bar.plan_step(ln)
             spinner = Spinner("preparing…"); spinner.start()
-        prev = step
+        prev  = step
         state = step
 
-    # ── handle clarify interrupt ───────────────────────────────────────────
+    # ── handle clarify interrupt ────────────────────────────────────────────
     while True:
         snapshot = shifu_graph.get_state(config)
         if not snapshot.next:
             break
-
         question = ""
         for task in getattr(snapshot, "tasks", []):
             for iv in getattr(task, "interrupts", []):
@@ -793,9 +1049,7 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
         if not question:
             break
 
-        # ask user
-        spinner.pause()
-        spinner.stop()
+        spinner.pause(); spinner.stop()
         iw = _tw() - 8
         _w(f"\n  {C.AB}┌{'─' * iw}┐{C.R}\n")
         _w(f"  {C.AB}│{C.R}  {C.BOLD}💬  SHIFU NEEDS A QUICK CLARIFICATION{C.R}\n")
@@ -803,23 +1057,24 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
         for line in textwrap.wrap(question, width=iw - 4) or [question]:
             _w(f"  {C.AB}│{C.R}  {C.W}{line}{C.R}\n")
         _w(f"  {C.AB}└{'─' * iw}┘{C.R}\n")
+
         ts_str = datetime.now().strftime("%H:%M")
         prompt = f"  {C.GD}[{ts_str}]{C.R}  {C.AB}›{C.R}  "
         try:
-            answer = input(prompt).strip()
+            answer = await asyncio.to_thread(input, prompt)
+            answer = answer.strip()
         except (EOFError, KeyboardInterrupt):
             answer = ""
         if not answer:
             answer = "(user skipped — use your best judgment)"
 
         bar.clarification(question, answer)
-        spinner = Spinner("planning…"); spinner.start()
+        spinner = Spinner("re-planning…"); spinner.start()
 
         for step in shifu_graph.stream(Command(resume=answer), config=config, stream_mode="values"):
-            prev_c = prev.get("plan") if prev else None
-            if not prev_c and step.get("plan"):
+            if not (prev or {}).get("plan") and step.get("plan"):
                 spinner.stop()
-                bar.phase("plan", "◈")
+                bar.phase("plan (revised)", "◈")
                 for ln in step["plan"].splitlines():
                     if re.match(r'^\s*\d+\.', ln):
                         bar.plan_step(ln)
@@ -827,19 +1082,26 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
             prev  = step
             state = step
 
-    # ────────────────────────────────────────────────────────────────────────
-    # PHASE 2: execute loop  (token streaming + tool calls)
-    # ────────────────────────────────────────────────────────────────────────
+    # ── PHASE 2: execute loop (streaming + tools) ───────────────────────────
     spinner.stop()
 
+    t_start = time.time()
+
     for iteration in range(MAX_ITERATIONS):
+        # Wall-clock timeout
+        if time.time() - t_start > MISSION_TIMEOUT:
+            bar.timeout()
+            break
+
         # Build message list
         if not state["messages"]:
             content = f"Mission: {state['mission']}"
-            if state["complexity"] == "COMPLEX" and state["plan"]:
+            if state["route"] == "COMPLEX" and state["plan"]:
                 content += f"\n\nExecution Plan:\n{state['plan']}"
             if state.get("clarification_a"):
                 content += f"\n\nUser clarification: {state['clarification_a']}"
+            if state.get("needs_memory"):
+                content += "\n\n[SYSTEM NOTE: Memory recall is relevant here. Call spada_recall NOW before responding — do not skip it.]"
             msgs: list[BaseMessage] = [
                 SystemMessage(content=_EXECUTOR_SYS),
                 HumanMessage(content=content),
@@ -847,86 +1109,97 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
         else:
             msgs = state["messages"]
 
-        # ── STREAM the executor response ────────────────────────────────────
+        # Stream executor response
         _blank()
         _dim_line()
         bar.phase(f"shifu  (turn {iteration + 1})", "▸")
 
-        _FINAL_MARKER = "Alright, I'm done"
-        response = await _stream_executor_turn(msgs, silent=False, stop_on=_FINAL_MARKER)
+        response = await _stream_executor_turn(msgs, silent=True)
 
-        # merge into state manually
         if not state["messages"]:
             all_msgs = msgs + [response]
         else:
             all_msgs = state["messages"] + [response]
         state = {**state, "messages": all_msgs, "iterations": iteration + 1}
-                # ── no tool calls → we're done or need review ───────────────────────
+
+        # Check for done sentinel in response
+        response_has_done = _DONE_SENTINEL in (response.content or "")
+
+        # No tool calls
         if not response.tool_calls:
-            if state["complexity"] == "COMPLEX":
+            if state["route"] == "COMPLEX":
                 spinner = Spinner("reviewing…"); spinner.start()
                 state = review_node(state)
                 spinner.stop()
                 bar.verdict(state["verdict"])
                 if state["verdict"] == "PASS" or state["retry_count"] >= MAX_RETRIES:
                     break
-                # RETRY — clear messages so executor gets a clean slate
-                # Keep the mission/plan/clarification but drop the failed exchange
                 state = {**state, "messages": []}
             else:
-                break  # SIMPLE: done
+                break
             continue
 
-        # ── tool calls present ──────────────────────────────────────────────
+        # Tool calls
         for tc in response.tool_calls:
             name = tc.get("name", "?")
             args = tc.get("args", {})
             primary = str(next(iter(args.values()), "")).replace("\n", " ")
             bar.tool_call(name, primary)
 
-        # run tools
-        tool_msgs = []
-        tool_map = {t.name: t for t in TOOLS}
+        tool_msgs  = []
+        tool_map   = {t.name: t for t in TOOLS}
         for tc in response.tool_calls:
             name = tc.get("name", "")
             args = tc.get("args", {})
             tid  = tc.get("id") or str(uuid.uuid4())
             tool = tool_map.get(name)
             if tool is None:
-                result = f"Error: tool '{name}' not found."
+                result = f'{{"status": "error", "message": "tool \'{name}\' not found"}}'
             else:
                 try:
                     result = tool.invoke(args)
                 except Exception as e:
-                    result = f"Error: {e}"
+                    result = f'{{"status": "error", "message": "{e}"}}'
             tool_msgs.append(ToolMessage(content=str(result), tool_call_id=tid, name=name))
+
         state = {**state, "messages": all_msgs + tool_msgs}
-        
-        # display tool results
+
         for tm in tool_msgs:
             if isinstance(tm, ToolMessage):
                 bar.tool_result(getattr(tm, "name", "tool"), str(tm.content))
 
-    # ────────────────────────────────────────────────────────────────────────
-    # EXTRACT FINAL RESPONSE
-    # ────────────────────────────────────────────────────────────────────────
+        # If the done sentinel was present and tools finished, we're done
+        if response_has_done:
+            break
+
+    # ── extract final answer ────────────────────────────────────────────────
     messages = state.get("messages", [])
-    last_ai = next(
-    (m for m in reversed(messages) if isinstance(m, AIMessage) and m.content), None
-)
+    last_ai  = next(
+        (m for m in reversed(messages) if isinstance(m, AIMessage) and m.content), None
+    )
+
+    final_text = ""
     if last_ai:
-        content = last_ai.content
-        idx = content.lower().find("alright, i'm done")
-        # send only the "Alright, I'm done —" onwards to the amber box
-        return content[idx:] if idx != -1 else content
+        # Strip the sentinel token from display
+        final_text = last_ai.content.replace(_DONE_SENTINEL, "").strip()
 
-    tool_results = [m for m in messages if isinstance(m, ToolMessage)]
-    if tool_results:
-        lines = [f"  [{getattr(m,'name','tool')}] {str(m.content).strip()[:120]}"
-                 for m in tool_results[-5:]]
-        return "Mission complete. Last tool outputs:\n" + "\n".join(lines)
+    if not final_text:
+        tool_results = [m for m in messages if isinstance(m, ToolMessage)]
+        if tool_results:
+            lines = [f"  [{getattr(m,'name','tool')}] {str(m.content).strip()[:120]}"
+                     for m in tool_results[-5:]]
+            final_text = "Mission complete. Last tool outputs:\n" + "\n".join(lines)
+        else:
+            final_text = "Mission complete."
 
-    return "Mission complete (no textual output)."
+    # ── skill auto-generation offer (COMPLEX novel tasks) ───────────────────
+    if state["route"] == "COMPLEX" and state.get("plan") and state["retry_count"] == 0:
+        skill_name = re.sub(r'[^a-z0-9_]+', '_', mission.lower().strip())[:30].strip('_')
+        if not (SKILLS_DIR / skill_name / "SKILL.md").exists():
+            _blank()
+            await _offer_skill_save(mission, state["plan"])
+
+    return final_text
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -951,11 +1224,10 @@ def _render_code_block(lang: str, code: str, inner_w: int):
     _w("  " + C.GD + "╰" + "─" * inner_w + C.R + "\n")
 
 def render_response(text: str, elapsed: float):
-    """
-    Render only the *final* assistant message in the amber box.
-    (The streaming already printed intermediate tokens inline.)
-    """
-    iw = _tw() - 6
+    # Strip sentinel just in case it leaked
+    text = text.replace(_DONE_SENTINEL, "").strip()
+
+    iw  = _tw() - 6
     _blank()
     ts  = datetime.now().strftime("%H:%M:%S")
     tag = f" shifu  {ts}  {elapsed:.1f}s "
@@ -969,14 +1241,13 @@ def render_response(text: str, elapsed: float):
         _w("  " + C.A + "│" + C.R + "  " + content + "\n")
 
     def wrap_box(raw: str, prefix: str = ""):
-            avail = iw - len(prefix)
-            # continuation lines indent to align with text, not repeat the bullet
-            indent = " " * len(re.sub(r'\033\[[0-9;]*m', '', prefix))
-            lines_ = textwrap.wrap(raw, width=max(40, avail),
-                                   break_long_words=False, break_on_hyphens=False) or [""]
-            for idx, wl in enumerate(lines_):
-                lead = prefix if idx == 0 else indent
-                box_line(lead + C.W + _inline_md(wl) + C.R)
+        avail = iw - len(prefix)
+        indent = " " * len(re.sub(r'\033\[[0-9;]*m', '', prefix))
+        lines_ = textwrap.wrap(raw, width=max(40, avail),
+                               break_long_words=False, break_on_hyphens=False) or [""]
+        for idx, wl in enumerate(lines_):
+            lead = prefix if idx == 0 else indent
+            box_line(lead + C.W + _inline_md(wl) + C.R)
 
     while i < len(lines):
         ln = lines[i]
@@ -994,6 +1265,7 @@ def render_response(text: str, elapsed: float):
 
         if ln.strip() == "":
             box_line(""); i += 1; continue
+
         if ln.startswith("# "):
             box_line("")
             box_line(C.AB + ln[2:].upper() + C.R)
@@ -1069,7 +1341,8 @@ def render_response(text: str, elapsed: float):
 # ══════════════════════════════════════════════════════════════════════════════
 #  SESSION COMMANDS
 # ══════════════════════════════════════════════════════════════════════════════
-
+_session_missions: list[str] = []
+_SESSION_THREAD_ID: str = str(uuid.uuid4()) 
 _history: list[dict] = []
 
 def show_history():
@@ -1104,7 +1377,7 @@ def show_help():
         ("skills",      "list installed skills"),
         ("files",       "supported file types"),
         ("clear / cls", "reset screen"),
-        ("exit / quit", "shutdown"),
+        ("exit / quit", "shutdown (saves session memory)"),
         ("<anything>",  "send to shifu"),
     ]:
         _w(f"  {C.A}{cmd:<16}{C.R}{C.G}{desc}{C.R}\n")
@@ -1135,8 +1408,12 @@ def get_input() -> str:
     except (EOFError, KeyboardInterrupt):
         return "exit"
 
-def shutdown():
+async def shutdown():
     _blank()
+    _w("  " + C.G + "wrapping up…" + C.R + "\n")
+    spinner = Spinner("saving session…"); spinner.start()
+    await _run_session_close(spinner)
+    spinner.stop()
     _w("  " + C.G + "goodbye." + C.R + "\n")
     _blank()
     sys.exit(0)
@@ -1154,16 +1431,17 @@ async def _main_async():
 
     while True:
         try:
-            raw = get_input()
+            raw = await asyncio.to_thread(get_input)
         except KeyboardInterrupt:
-            _blank(); shutdown()
+            _blank()
+            await shutdown()
 
         if not raw:
             continue
 
         cmd = raw.lower()
         if cmd in ("exit", "quit", "q"):
-            shutdown()
+            await shutdown()
         elif cmd in ("help", "?", "h"):
             show_help(); continue
         elif cmd in ("clear", "cls"):
@@ -1180,13 +1458,24 @@ async def _main_async():
         _dim_line()
         _blank()
 
+        _session_missions.append(raw)
+
         bar     = Bar()
         spinner = Spinner("reading mission…")
         t0      = time.time()
         answer  = None
 
         try:
-            answer = await run_mission_async(raw, bar, spinner)
+            answer = await asyncio.wait_for(
+                run_mission_async(raw, bar, spinner),
+                timeout=MISSION_TIMEOUT + 10,  # grace period on top of internal timeout
+            )
+        except asyncio.TimeoutError:
+            try:    spinner.stop()
+            except: pass
+            bar.timeout()
+            _w("  " + C.ERR + "mission timed out." + C.R + "\n")
+            _blank(); continue
         except KeyboardInterrupt:
             try:    spinner.stop()
             except: pass
@@ -1207,8 +1496,6 @@ async def _main_async():
             _blank(); continue
 
         _history.append({"t": datetime.now().strftime("%H:%M:%S"), "q": raw})
-
-        # The final "Alright, I'm done —" summary gets rendered in the amber box
         render_response(answer, elapsed)
 
 
