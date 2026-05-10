@@ -963,4 +963,286 @@ spada_recall        = SpadaRecallTool()
 spada_memorise      = SpadaMemorizeTool()
 spada_session_close = SpadaSessionCloseTool()
 
-__all__ = ["spada_recall", "spada_memorise", "spada_session_close"]
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  HOT MEMORY — Ephemeral rolling context  (prompt + response atoms per turn)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  Cold memory (above) persists facts for weeks/months in ChromaDB.
+#  Hot memory is different — it stores exactly 2 things per completed turn:
+#    1. Atomised version of the user's input prompt
+#    2. Atomised version of the final model output + actions
+#
+#  This rolling window is injected into every executor system prompt so
+#  Shifu has immediate, zero-latency awareness of what just happened —
+#  no embedding lookup needed.
+#
+#  Config env vars:
+#    HOT_MEMORY_MAX_TURNS   max turns to keep          (default: 15)
+#    HOT_MEMORY_PATH        path to backing JSON file  (default: .shifu/hot_memory.json)
+# ═════════════════════════════════════════════════════════════════════════════
+
+HOT_MEMORY_MAX_TURNS = int(os.getenv("HOT_MEMORY_MAX_TURNS", "15"))
+_HOT_PERSIST_PATH    = Path(os.getenv("HOT_MEMORY_PATH", ".shifu/hot_memory.json"))
+
+_HOT_ATOMISE_SYSTEM = """
+You are a context atomiser for an AI assistant called Shifu.
+Given a piece of text (a user prompt OR an AI response), extract 1-3 key facts
+as a JSON array of short strings.
+
+Rules:
+  - USER PROMPT atoms: capture intent, topic, specific parameters, file paths, names
+  - AI RESPONSE atoms: capture what was done, what was produced, tools invoked, outcomes
+  - Each atom ≤ 18 words, self-contained
+  - Skip filler, greetings, polite boilerplate
+  - Return ONLY a JSON array of strings — no preamble, no markdown fences
+
+Examples:
+  User prompt  → ["User asked for a Python web scraper targeting example.com", "User wants pagination and a CSV output"]
+  AI response  → ["Wrote Playground/scraper.py using BeautifulSoup", "Ran pip install requests beautifulsoup4", "Saved 42 results to Playground/results.csv"]
+""".strip()
+
+
+@dataclass
+class _HotEntry:
+    turn:           int
+    ts:             str   # HH:MM wall-clock at storage time
+    prompt_atoms:   list
+    response_atoms: list
+
+
+class _HotMemory:
+    """
+    Rolling per-turn hot memory store.
+
+    Stores (prompt_atoms, response_atoms) pairs for the last N turns and
+    surfaces them as a compact plain-text block for system prompt injection.
+    Backed by a lightweight JSON file entirely separate from the cold ChromaDB
+    store — your spada_db_shifu data is never touched.
+
+    Thread-safe. Wipe with .clear() or the /reset_mem terminal command.
+    """
+
+    def __init__(self):
+        _HOT_PERSIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._lock:    threading.Lock  = threading.Lock()
+        self._entries: list            = []   # list[_HotEntry]
+        self._turn:    int             = 0
+        self._load_from_disk()
+
+    # ── persistence ──────────────────────────────────────────────────────────
+
+    def _load_from_disk(self):
+        if not _HOT_PERSIST_PATH.exists():
+            return
+        try:
+            raw  = json.loads(_HOT_PERSIST_PATH.read_text(encoding="utf-8"))
+            for e in raw.get("entries", []):
+                self._entries.append(_HotEntry(
+                    turn=int(e.get("turn", 0)),
+                    ts=e.get("ts", ""),
+                    prompt_atoms=list(e.get("prompt_atoms", [])),
+                    response_atoms=list(e.get("response_atoms", [])),
+                ))
+            if self._entries:
+                self._turn = max(e.turn for e in self._entries)
+            _log(
+                f"hot memory loaded — {len(self._entries)} turn(s) "
+                f"(max {HOT_MEMORY_MAX_TURNS})",
+                colour=_C.MEM,
+            )
+        except Exception as exc:
+            _log(f"hot memory load error: {exc} — starting fresh", colour=_C.ERR)
+            self._entries = []
+
+    def _save_to_disk(self):
+        try:
+            payload = {
+                "entries": [
+                    {
+                        "turn":           e.turn,
+                        "ts":             e.ts,
+                        "prompt_atoms":   e.prompt_atoms,
+                        "response_atoms": e.response_atoms,
+                    }
+                    for e in self._entries
+                ]
+            }
+            _HOT_PERSIST_PATH.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            _log(f"hot memory save error: {exc}", colour=_C.ERR)
+
+    # ── write ─────────────────────────────────────────────────────────────────
+
+    def store(self, prompt_atoms: list, response_atoms: list):
+        """
+        Add a new (prompt, response) atom pair.
+        Trims the window to HOT_MEMORY_MAX_TURNS and persists to disk.
+        """
+        with self._lock:
+            self._turn += 1
+            self._entries.append(_HotEntry(
+                turn=self._turn,
+                ts=datetime.utcnow().strftime("%H:%M"),
+                prompt_atoms=prompt_atoms[:3],    # hard cap: 3 atoms each
+                response_atoms=response_atoms[:3],
+            ))
+            if len(self._entries) > HOT_MEMORY_MAX_TURNS:
+                self._entries = self._entries[-HOT_MEMORY_MAX_TURNS:]
+            self._save_to_disk()
+
+    # ── wipe ─────────────────────────────────────────────────────────────────
+
+    def clear(self):
+        """Wipe all hot memory. Called by /reset_mem."""
+        with self._lock:
+            wiped = len(self._entries)
+            self._entries = []
+            self._turn    = 0
+            if _HOT_PERSIST_PATH.exists():
+                _HOT_PERSIST_PATH.unlink()
+        _log(f"hot memory cleared — {wiped} turn(s) erased", colour=_C.OK)
+        return wiped
+
+    # ── read ─────────────────────────────────────────────────────────────────
+
+    def as_prompt_block(self) -> str:
+        """
+        Returns a compact hot memory injection block for executor system prompts.
+        Empty string if no entries yet.
+        """
+        with self._lock:
+            if not self._entries:
+                return ""
+            lines = []
+            for e in self._entries:
+                p_line = " · ".join(e.prompt_atoms)  if e.prompt_atoms  else "(no data)"
+                r_line = " · ".join(e.response_atoms) if e.response_atoms else "(no output)"
+                rel    = len(self._entries) - self._entries.index(e)
+                marker = "← most recent" if rel == 1 else ""
+                lines.append(
+                    f"  T{e.turn} [{e.ts}] {marker}\n"
+                    f"    IN : {p_line}\n"
+                    f"    OUT: {r_line}"
+                )
+            body = "\n".join(lines)
+            return (
+                "══ HOT MEMORY (recent turns — injected for immediate continuity) ══\n"
+                f"{body}\n"
+                "Maintain continuity naturally. Don't repeat completed work unless\n"
+                "explicitly asked. Build on prior turns when relevant.\n"
+                "═══════════════════════════════════════════════════════════════════"
+            )
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def stats(self) -> dict:
+        with self._lock:
+            total_atoms = sum(
+                len(e.prompt_atoms) + len(e.response_atoms)
+                for e in self._entries
+            )
+            return {
+                "turns":       len(self._entries),
+                "max_turns":   HOT_MEMORY_MAX_TURNS,
+                "total_atoms": total_atoms,
+                "path":        str(_HOT_PERSIST_PATH.resolve()),
+            }
+
+    def preview_entries(self) -> list:
+        """Return entries as plain dicts for display purposes."""
+        with self._lock:
+            return [
+                {
+                    "turn":           e.turn,
+                    "ts":             e.ts,
+                    "prompt_atoms":   e.prompt_atoms,
+                    "response_atoms": e.response_atoms,
+                }
+                for e in self._entries
+            ]
+
+
+# ── Standalone hot atomiser ───────────────────────────────────────────────────
+
+def hot_atomise(text: str, role: str = "prompt") -> list:
+    """
+    Atomise a prompt or response into 1-3 key fact strings.
+    Uses the same Ollama endpoint as the cold memory LLM.
+
+    role: "prompt"   — user input (extract intent + key details)
+          "response" — AI output  (extract what was done/produced)
+
+    Returns a list[str] of atoms. Falls back gracefully on LLM errors.
+    """
+    from openai import OpenAI
+
+    role_hint = (
+        "This is a USER PROMPT. Focus on intent, topic, and specific parameters."
+        if role == "prompt"
+        else "This is an AI RESPONSE. Focus on what was done, produced, or decided."
+    )
+    client = OpenAI(base_url=_OLLAMA_BASE_URL, api_key=_OLLAMA_API_KEY)
+    try:
+        resp = client.chat.completions.create(
+            model=_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": _HOT_ATOMISE_SYSTEM},
+                {
+                    "role":    "user",
+                    "content": f"[{role_hint}]\n\n{text[:1500]}",
+                },
+            ],
+            temperature=0.0,
+            max_tokens=256,
+        )
+        raw = resp.choices[0].message.content.strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.lstrip().startswith("json"):
+                raw = raw.lstrip()[4:]
+        parsed = json.loads(raw.strip())
+        if isinstance(parsed, list):
+            return [str(a).strip() for a in parsed if str(a).strip()][:3]
+    except Exception:
+        pass
+    # Graceful fallback: first non-empty line truncated
+    fallback = next(
+        (ln.strip() for ln in text.strip().splitlines() if ln.strip()),
+        "",
+    )
+    return [fallback[:120]] if fallback else []
+
+
+# ── Singleton ─────────────────────────────────────────────────────────────────
+
+_hot_memory_instance: Optional[_HotMemory] = None
+_hot_memory_lock                            = threading.Lock()
+
+
+def _get_hot_memory() -> _HotMemory:
+    global _hot_memory_instance
+    with _hot_memory_lock:
+        if _hot_memory_instance is None:
+            _hot_memory_instance = _HotMemory()
+    return _hot_memory_instance
+
+
+hot_memory = _get_hot_memory()
+
+
+__all__ = [
+    # cold memory tools
+    "spada_recall",
+    "spada_memorise",
+    "spada_session_close",
+    # hot memory
+    "hot_memory",
+    "hot_atomise",
+]
