@@ -206,9 +206,7 @@ _TOOL_REGISTRY: dict[str, Any] = {}   # name → callable (the underlying functi
 def _load_tools():
     """
     Import the shared tools/ package and build a name→callable registry.
-    The tools/ package uses LangChain BaseTool instances; we extract the
-    underlying .func so we can call them synchronously without the full
-    LangGraph machinery.
+    Calls the public BaseTool.run() so argument validation still applies.
     """
     global _TOOL_REGISTRY
     _TOOL_REGISTRY = {}
@@ -221,21 +219,32 @@ def _load_tools():
 
     from langchain_core.tools import BaseTool
 
+    seen_tools: set[str] = set()   # deduplicate across re-exports
+
     for _, mod_name, _ in pkgutil.walk_packages(tools_pkg.__path__, tools_pkg.__name__ + "."):
         try:
+            # Force a fresh load to avoid stale cached modules from automator's
+            # own scan at import time (which can leave singletons un-initialized).
             mod = importlib.import_module(mod_name)
+            # Reload only tool modules (not automator, to avoid re-entrant LLM calls)
+            if "automator" not in mod_name:
+                mod = importlib.reload(mod)
         except Exception as e:
             _log.warning("Could not import %s: %s", mod_name, e)
             continue
-        for obj in vars(mod).values():
-            if isinstance(obj, BaseTool):
-                # BaseTool exposes .func for the underlying Python function
-                fn = getattr(obj, "func", None) or getattr(obj, "_run", None)
-                if fn:
-                    _TOOL_REGISTRY[obj.name] = fn
-                    _log.debug("Registered tool: %s", obj.name)
 
-    _log.info("Loaded %d tools from tools/ package", len(_TOOL_REGISTRY))
+        for attr_name, obj in vars(mod).items():
+            if not isinstance(obj, BaseTool):
+                continue
+            if obj.name in seen_tools:
+                continue
+            # Use the public .run() method — goes through LangChain validation.
+            # Wrap it so the daemon can call tool_fn(**kwargs) directly.
+            _TOOL_REGISTRY[obj.name] = obj._run   # bound to the singleton instance
+            seen_tools.add(obj.name)
+            _log.info("Registered tool: %s (from %s.%s)", obj.name, mod_name, attr_name)
+
+    _log.info("Loaded %d tools: %s", len(_TOOL_REGISTRY), sorted(_TOOL_REGISTRY))
 
 
 # ── Template variable substitution ────────────────────────────────────────────
