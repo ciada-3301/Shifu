@@ -64,7 +64,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal, Optional, TypedDict
-
+import uuid as _uuid
 # ── third-party ────────────────────────────────────────────────────────────────
 from dotenv import load_dotenv
 from langchain_core.messages import (
@@ -323,13 +323,17 @@ executor_with_tools = executor_llm.bind_tools(TOOLS)
 # ── Hot memory ─────────────────────────────────────────────────────────────
 # Imported after tools load; gracefully disabled if spada_memory isn't present.
 
+_SESSION_ID        = str(_uuid.uuid4())
+_SESSION_THREAD_ID = str(uuid.uuid4())
+
 try:
-    from tools.spada_memory import hot_memory as _hot_memory
-    from tools.spada_memory import hot_atomise as _hot_atomise
-    _HOT_MEM = True
+    from tools.spada_tool import hot_atomise as _hot_atomise
+    from tools.spada_tool import _get_hot_memory
+    _hot_memory = _get_hot_memory(session_id=_SESSION_ID)
+    _HOT_MEM    = True
 except Exception as _hot_import_err:
-    _hot_memory  = None   # type: ignore[assignment]
-    _hot_atomise = None   # type: ignore[assignment]
+    _hot_memory  = None
+    _hot_atomise = None
     _HOT_MEM     = False
 
 # Tool icons: auto-populated from known names; unknown tools get a sensible default
@@ -1410,8 +1414,6 @@ def render_response(text: str, elapsed: float):
 # ══════════════════════════════════════════════════════════════════════════════
 #  SESSION COMMANDS
 # ══════════════════════════════════════════════════════════════════════════════
-_session_missions: list[str] = []
-_SESSION_THREAD_ID: str = str(uuid.uuid4()) 
 _history: list[dict] = []
 
 def show_history():
