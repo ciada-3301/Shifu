@@ -345,6 +345,8 @@ _ask_user_queue: "asyncio.Queue[tuple]" = None   # initialised in _main_async
 import concurrent.futures as _cf
 from langchain_core.tools import tool as _lc_tool
 
+_ask_user_loop = None   # set to the running event loop in _main_async
+
 @_lc_tool
 def ask_user(question: str) -> str:
     """
@@ -353,11 +355,12 @@ def ask_user(question: str) -> str:
     an ambiguous choice, a missing detail you cannot reasonably default on.
     One question at a time. Do NOT use for things you can assume.
     """
-    if _ask_user_queue is None:
+    if _ask_user_queue is None or _ask_user_loop is None:
         return "(ask_user unavailable — no event loop)"
     fut: _cf.Future = _cf.Future()
-    loop = asyncio.get_event_loop()
-    loop.call_soon_threadsafe(_ask_user_queue.put_nowait, (question, fut))
+    # call_soon_threadsafe is the correct way to post from a worker thread
+    # into the main asyncio event loop — never get_event_loop() from a thread
+    _ask_user_loop.call_soon_threadsafe(_ask_user_queue.put_nowait, (question, fut))
     return fut.result(timeout=300)
 
 TOOLS.append(ask_user)
@@ -529,10 +532,16 @@ M6. PROACTIVE — if recall returns [PROACTIVE CONTEXT], surface it naturally
     Don't dump it mechanically; weave it in conversationally.
 
 ══ COMPLETION SIGNAL ════════════════════════════════════════════════════════
-When you are fully done with a task, include the hidden token <<<DONE>>> 
+When you are fully done with a task, include the hidden token <<<DONE>>>
 somewhere in your response (it will be stripped before display).
 Then write your natural closing — no forced "Alright, I'm done —" preamble.
 Just speak like a person who finished something and wants to tell you about it.
+
+CRITICAL: Never emit <<<DONE>>> and ask_user() in the same turn.
+  • If you still have a question to ask → call ask_user(), no <<<DONE>>>.
+  • If you are genuinely finished → emit <<<DONE>>>, no more tool calls.
+  • Writing a question as plain text does NOT pause execution — the user
+    will never see it as a question. Always use ask_user() to actually wait.
 
 ══ CRITICAL RULES ════════════════════════════════════════════════════════════
 1. ALWAYS USE TOOLS TO CREATE FILES. Never write file content in your response
@@ -1183,18 +1192,18 @@ async def _offer_skill_save(mission: str, plan: str):
 
 async def _drain_ask_user_queue():
     """
-    Runs concurrently with the execute loop.
+    Runs concurrently with the execute loop for the entire mission duration.
     When ask_user() enqueues a question, this coroutine:
-      1. Stops any active spinner.
-      2. Prints the question inside a distinct UI frame.
-      3. Reads the user's answer from stdin.
-      4. Resolves the Future so the blocked tool thread continues.
+      1. Prints the question inside a distinct UI frame.
+      2. Reads the user's answer from stdin.
+      3. Resolves the Future so the blocked tool thread continues.
+    Stays alive until cancelled by the mission runner — never self-exits.
     """
     while True:
         try:
-            question, fut = await asyncio.wait_for(_ask_user_queue.get(), timeout=0.1)
-        except asyncio.TimeoutError:
-            return   # caller checks this task; exits when mission loop ends
+            question, fut = await _ask_user_queue.get()
+        except asyncio.CancelledError:
+            return   # mission ended — clean exit
         except Exception:
             return
 
@@ -1756,8 +1765,9 @@ async def shutdown():
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _main_async():
-    global _ask_user_queue
+    global _ask_user_queue, _ask_user_loop
     _ask_user_queue = asyncio.Queue()
+    _ask_user_loop  = asyncio.get_running_loop()   # safe — we ARE in the loop here
     boot()
     _w("  " + C.OK + "✓  ready" + C.R +
        "  " + C.G  + f"playground → {PLAYGROUND_DIR.resolve()}" + C.R + "\n")
