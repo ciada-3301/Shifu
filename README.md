@@ -94,7 +94,7 @@ You talk to Shifu in plain language. Shifu plans, executes, remembers, and autom
 
 ---
 
-## SPADA — Persistent Memory System
+## SPADA — Spatial Probability Attention Distribution Algorithm (I developed it)
 
 > SPADA is one of Shifu's two novel core contributions. It gives Shifu a genuine long-term memory that persists across sessions, survives process restarts, and never sends your data to an external service.
 
