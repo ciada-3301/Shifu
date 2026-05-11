@@ -84,6 +84,7 @@ _DEDUP_THRESHOLD      = float(os.getenv("DEDUP_THRESHOLD",      "0.88"))
 
 _SPADA_COLLECTION     = os.getenv("SPADA_COLLECTION",  "shifu_memory")
 _SPADA_PERSIST_DIR    = os.getenv("SPADA_PERSIST_DIR", "./spada_db_shifu")
+_HOT_SESSION_STAMP_PATH = Path(os.getenv("HOT_MEMORY_PATH", ".shifu/hot_memory.json")).with_suffix(".session")
 
 # TTL durations
 _TTL_DURATIONS = {
@@ -1023,20 +1024,34 @@ class _HotMemory:
     Thread-safe. Wipe with .clear() or the /reset_mem terminal command.
     """
 
-    def __init__(self):
+    def __init__(self, session_id: str | None = None):
         _HOT_PERSIST_PATH.parent.mkdir(parents=True, exist_ok=True)
         self._lock:    threading.Lock  = threading.Lock()
-        self._entries: list            = []   # list[_HotEntry]
+        self._entries: list            = []
         self._turn:    int             = 0
-        self._load_from_disk()
+        self._load_from_disk(session_id=session_id)
 
-    # ── persistence ──────────────────────────────────────────────────────────
-
-    def _load_from_disk(self):
+    def _load_from_disk(self, session_id: str | None = None):
         if not _HOT_PERSIST_PATH.exists():
             return
+
+        # If a session_id is provided, check if it matches the last session.
+        # Mismatch means this is a fresh Shifu run — wipe hot memory.
+        if session_id is not None:
+            try:
+                last_session = _HOT_SESSION_STAMP_PATH.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                last_session = None
+
+            if last_session != session_id:
+                _log(f"new session detected ({session_id[:8]}…) — wiping hot memory", colour=_C.MEM)
+                _HOT_PERSIST_PATH.unlink(missing_ok=True)
+                _HOT_SESSION_STAMP_PATH.write_text(session_id, encoding="utf-8")
+                return   # start fresh
+
+        # Same session (e.g. daemon hot-reload) — restore normally
         try:
-            raw  = json.loads(_HOT_PERSIST_PATH.read_text(encoding="utf-8"))
+            raw = json.loads(_HOT_PERSIST_PATH.read_text(encoding="utf-8"))
             for e in raw.get("entries", []):
                 self._entries.append(_HotEntry(
                     turn=int(e.get("turn", 0)),
@@ -1226,11 +1241,11 @@ _hot_memory_instance: Optional[_HotMemory] = None
 _hot_memory_lock                            = threading.Lock()
 
 
-def _get_hot_memory() -> _HotMemory:
+def _get_hot_memory(session_id: str | None = None) -> _HotMemory:
     global _hot_memory_instance
     with _hot_memory_lock:
         if _hot_memory_instance is None:
-            _hot_memory_instance = _HotMemory()
+            _hot_memory_instance = _HotMemory(session_id=session_id)
     return _hot_memory_instance
 
 
