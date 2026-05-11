@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-shifu.py — Shifu Agent + Terminal UI  (v4)
+shifu.py — Shifu Agent + Terminal UI  (v5)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 v2 changes
 ──────────
@@ -42,6 +42,22 @@ v4 changes
 • /mem_status command: inspect hot + cold memory side-by-side.
 • Bar.hot_memory_inject() and Bar.hot_memory_store() visual ticks.
 • HOT_MEMORY_MAX_TURNS env var: configurable rolling window (default 15).
+
+v5 changes
+──────────
+• Dependency-aware parallel tool execution: the executor annotates tool calls
+  with a "group" integer. Same group = asyncio.gather (parallel). Different
+  groups = sequential. Default is sequential; parallelism is opt-in per call.
+• replan_node passes the already-known route so the planner never re-classifies
+  after clarification — one fewer source of route drift.
+• review_node fast-path extended with more error keywords (not found, permission
+  denied, no such file, refused) to skip the LLM reviewer on obvious clean runs.
+• Hot memory atomisation gated: COMPANION route and trivial queries (<= 4 words)
+  skip the two atomise LLM calls — no wasted spend on chit-chat.
+• Flow doctrine replaces hard-coded narration rule: executor decides when to
+  think aloud vs act silently based on whether commentary adds value.
+• Executor streams live (silent=False) so text appears as it's generated;
+  render_response is suppressed when streaming already showed the content.
 """
 
 # ── stdlib ─────────────────────────────────────────────────────────────────────
@@ -318,6 +334,33 @@ def _load_tools(package) -> list[BaseTool]:
 
 TOOLS               = _load_tools(tools_pkg)
 tool_node           = ToolNode(TOOLS)
+
+# ── ask_user: synthetic tool that lets the executor pause mid-task and ask ────
+# Defined here (not in tools/) because it needs terminal I/O access.
+# The tool enqueues the question; the mission loop drains the queue, prints the
+# prompt, waits for input, and resolves the Future — unblocking the tool thread.
+
+_ask_user_queue: "asyncio.Queue[tuple]" = None   # initialised in _main_async
+
+import concurrent.futures as _cf
+from langchain_core.tools import tool as _lc_tool
+
+@_lc_tool
+def ask_user(question: str) -> str:
+    """
+    Pause and ask the user a clarifying question mid-task. Returns their answer.
+    Use when you genuinely need information that changes what you do next —
+    an ambiguous choice, a missing detail you cannot reasonably default on.
+    One question at a time. Do NOT use for things you can assume.
+    """
+    if _ask_user_queue is None:
+        return "(ask_user unavailable — no event loop)"
+    fut: _cf.Future = _cf.Future()
+    loop = asyncio.get_event_loop()
+    loop.call_soon_threadsafe(_ask_user_queue.put_nowait, (question, fut))
+    return fut.result(timeout=300)
+
+TOOLS.append(ask_user)
 executor_with_tools = executor_llm.bind_tools(TOOLS)
 
 # ── Hot memory ─────────────────────────────────────────────────────────────
@@ -350,6 +393,7 @@ _KNOWN_TOOL_ICONS = {
     "spada_recall":         ("◎",  "recall"),
     "spada_memorise":       ("◉",  "memorise"),
     "spada_session_close":  ("◈",  "session"),
+    "ask_user":             ("?",  "ask"),
 }
 
 def _tool_icon(name: str) -> tuple[str, str]:
@@ -423,6 +467,22 @@ _EXECUTOR_SYS = f"""You are Shifu — a capable, perceptive AI agent who gets th
 SKILLS (copy verbatim into load_skill):
 {_skills_index()}
 
+══ TOOL SEQUENCING ═══════════════════════════════════════════════════════════
+When emitting multiple tool calls in one turn, annotate each with a "group"
+integer inside its args:
+
+  • Same group number  → tools run IN PARALLEL (asyncio.gather).
+    Use when outputs are truly independent: two web searches, two file reads,
+    recall + a directory listing.
+  • Different group numbers → groups run IN SEQUENCE. Use when B needs A's
+    output: search (group 1) → write file with results (group 2).
+  • If unsure, omit "group" entirely — each call gets its own group (safe
+    sequential default). Never guess parallel when order matters.
+
+Example — research two topics then write one combined file:
+  web_search("topic A", group=1), web_search("topic B", group=1)  ← parallel
+  file_write("combined.md", ..., group=2)                          ← after both
+
 ══ MEMORY RULES ══════════════════════════════════════════════════════════════
 
 M1. RECALL FIRST — for any non-trivial message, run spada_recall before acting.
@@ -487,21 +547,42 @@ Just speak like a person who finished something and wants to tell you about it.
 
 3. CREATE DIRECTORIES BEFORE FILES using the terminal tool.
 
-4. NEVER ASK THE USER QUESTIONS MID-TASK. State your assumption briefly
-   ("I'll assume X — say so if you'd like it changed") and keep going.
+4. ASKING MID-TASK — use ask_user(question) when the answer would genuinely
+   change what you do next and you cannot reasonably default. One question at a
+   time. For minor unknowns, state your assumption and proceed. Never ask about
+   things that don't matter to the outcome.
 
 5. COMPANION MODE — for casual chat, emotional messages, or simple questions:
    keep it warm and natural. No bullet lists. No task summaries. Just talk.
    Memory recall is still useful here — connect past context to present moment.
 
-══ TONE ══════════════════════════════════════════════════════════════════════
-Before your first tool call on non-trivial tasks: 1-2 sentences saying what
-you're about to do and why. Natural English, first person, no bullet lists.
+══ FLOW DOCTRINE ══════════════════════════════════════════════════════════════
+You control the narrative rhythm. There is no fixed pattern.
 
-After each tool result: 1 sentence on what just came back. Be honest about
-surprises or errors. Never just say "Done." silently.
+For each turn, choose the right beat:
+  • Think aloud BEFORE a tool call when the reasoning helps the user track
+    what you're doing and why — not as ritual, only when it adds something.
+  • Stay silent before a tool call when the action speaks for itself
+    (a web search after "what's the weather" needs no preamble).
+  • React AFTER a tool result when something interesting came back —
+    a surprise, an error, a key finding worth flagging.
+  • Stay silent after a tool result when it was routine and the next action
+    is obvious.
+  • Synthesise mid-task when you have enough to say something useful —
+    don't save everything for the end.
+  • Close naturally — not a summary of what you did, but the answer itself
+    (or the insight, or the recommendation). Speak as if the tools were
+    invisible infrastructure, not the point.
 
-When finished: speak naturally. No ritual openers. Just close warmly.
+What to avoid:
+  × "Let me now...", "I'll go ahead and...", "Now I will..." — stall phrases
+    that delay actual content. Start with the substance.
+  × Restating what a tool result says. If search returned X, use it, don't echo it.
+  × A closing paragraph recapping your steps. The user watched you work.
+    Just land the plane.
+
+The best responses feel like a sharp person thinking, acting, and telling
+you what matters — not narrating their own procedure.
 
 Max {MAX_ITERATIONS} tool-call iterations. Hard timeout: {MISSION_TIMEOUT}s.
 """
@@ -636,6 +717,7 @@ def replan_node(state: ShifuState) -> ShifuState:
         HumanMessage(content=(
             f"Mission: {state['mission']}\n"
             f"User clarification: {state['clarification_a']}\n"
+            f"Route is already: {state['route']} — do not change it.\n"
             f"Playground: {PLAYGROUND_DIR.resolve()}"
         )),
     ])
@@ -671,7 +753,10 @@ def review_node(state: ShifuState) -> ShifuState:
 
     # Fast-path pass: no error keywords
     if last_tool:
-        err_kw = ("error", "exception", "failed", "traceback", "timeout")
+        err_kw = (
+            "error", "exception", "failed", "traceback", "timeout",
+            "not found", "permission denied", "no such file", "refused",
+        )
         if not any(k in str(last_tool.content).lower() for k in err_kw):
             return {**state, "verdict": "PASS"}
 
@@ -765,13 +850,54 @@ _DONE_SENTINEL = "<<<DONE>>>"
 async def _stream_executor_turn(
     messages: list[BaseMessage],
     silent: bool = False,
+    box_header: str = "",   # pre-built header line; if set, stream inside the box
 ) -> AIMessage:
-    full_text       = ""
-    tool_calls      = []
-    in_text         = False
+    """
+    Stream one executor turn.
 
-    if not silent:
-        _w("\n  " + C.A + "│" + C.R + "  ")
+    When box_header is provided (non-silent path) the output is framed live:
+
+        ┌ shifu  HH:MM:SS ──────────────────────┐
+        │  tokens stream here as they arrive …
+        │  wrapping at terminal width            │  ← closing │ added per-line
+        └────────────────────────────────────────┘
+
+    Each token is appended to a line buffer; when a newline arrives (or at the
+    end) the line is flushed with the left border prefix.  The closing └ bar is
+    printed after the last token.  Tool-call-only turns (no text content) print
+    nothing and skip the box entirely so there's no empty frame.
+    """
+    import json
+
+    full_text  = ""
+    tool_calls = []
+    line_buf   = ""     # accumulates tokens until a newline
+    in_box     = False  # whether we've opened the box header yet
+    iw         = _tw() - 6   # inner width, same as render_response
+
+    def _border_prefix() -> str:
+        return "  " + C.A + "│" + C.R + "  "
+
+    def _flush_line(line: str, final: bool = False):
+        """Write a buffered line inside the box, with word-wrap."""
+        nonlocal in_box
+        if not line and not final:
+            return
+        # Open box on first real content
+        if not in_box and not silent and box_header:
+            _w(box_header + "\n")
+            in_box = True
+        if silent:
+            return
+        # Word-wrap the line to iw
+        if not line:
+            _w(_border_prefix() + "\n")
+            return
+        wrapped = textwrap.wrap(line, width=iw - 4,
+                                break_long_words=True, break_on_hyphens=False) or [line]
+        for wl in wrapped:
+            _w(_border_prefix() + C.STREAM + wl + C.R + "\n")
+        sys.stdout.flush()
 
     async for event in executor_with_tools.astream_events(messages, version="v2"):
         kind = event.get("event", "")
@@ -783,12 +909,17 @@ async def _stream_executor_turn(
                 if token:
                     full_text += token
                     if not silent:
-                        # Strip the sentinel token from live stream display
-                        display_token = token.replace(_DONE_SENTINEL, "").replace("<<<DONE", "").replace("DONE>>>", "")
-                        if display_token:
-                            in_text = True
-                            _w(C.STREAM + display_token + C.R)
-                            sys.stdout.flush()
+                        # Strip sentinel fragments from display
+                        display = (token
+                                   .replace(_DONE_SENTINEL, "")
+                                   .replace("<<<DONE", "")
+                                   .replace("DONE>>>", ""))
+                        # Split on newlines; flush complete lines immediately
+                        parts = display.split("\n")
+                        line_buf += parts[0]
+                        for part in parts[1:]:
+                            _flush_line(line_buf)
+                            line_buf = part
 
             if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
                 for tc in chunk.tool_call_chunks:
@@ -799,10 +930,14 @@ async def _stream_executor_turn(
                     if tc.get("name"): tool_calls[idx]["name"] += tc["name"]
                     if tc.get("args"): tool_calls[idx]["args"] += tc["args"]
 
-    if in_text:
-        _w("\n")
+    # Flush any remaining buffered content and close the box
+    if not silent:
+        if line_buf:
+            _flush_line(line_buf, final=True)
+        if in_box:
+            _w("  " + C.A + "└" + "─" * (iw + 2) + "┘" + C.R + "\n")
+            _blank()
 
-    import json
     parsed_tcs = []
     for tc in tool_calls:
         try:    args = json.loads(tc["args"]) if tc["args"] else {}
@@ -1043,6 +1178,51 @@ async def _offer_skill_save(mission: str, plan: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ASK_USER DRAIN  — resolves queued questions from the executor tool
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _drain_ask_user_queue():
+    """
+    Runs concurrently with the execute loop.
+    When ask_user() enqueues a question, this coroutine:
+      1. Stops any active spinner.
+      2. Prints the question inside a distinct UI frame.
+      3. Reads the user's answer from stdin.
+      4. Resolves the Future so the blocked tool thread continues.
+    """
+    while True:
+        try:
+            question, fut = await asyncio.wait_for(_ask_user_queue.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            return   # caller checks this task; exits when mission loop ends
+        except Exception:
+            return
+
+        iw = _tw() - 8
+        _w("\n")
+        _w(f"  {C.HINT}┌{'─' * iw}┐{C.R}\n")
+        _w(f"  {C.HINT}│{C.R}  {C.BOLD}Shifu needs to know:{C.R}\n")
+        _w(f"  {C.HINT}│{C.R}\n")
+        for line in textwrap.wrap(question, width=iw - 4) or [question]:
+            _w(f"  {C.HINT}│{C.R}  {C.W}{line}{C.R}\n")
+        _w(f"  {C.HINT}└{'─' * iw}┘{C.R}\n")
+
+        ts_str = datetime.now().strftime("%H:%M")
+        prompt = f"  {C.GD}[{ts_str}]{C.R}  {C.HINT}›{C.R}  "
+        try:
+            answer = await asyncio.to_thread(input, prompt)
+            answer = answer.strip()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if not answer:
+            answer = "(no answer — use your best judgment)"
+
+        _w("\n")
+        fut.set_result(answer)
+        _ask_user_queue.task_done()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MISSION RUNNER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1132,7 +1312,11 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
     # ── PHASE 2: execute loop (streaming + tools) ───────────────────────────
     spinner.stop()
 
-    t_start = time.time()
+    t_start          = time.time()
+    _streamed_content = False  # tracks whether live text has already been printed
+
+    # Start the ask_user drain as a background task for this mission
+    _drain_task = asyncio.create_task(_drain_ask_user_queue())
 
     for iteration in range(MAX_ITERATIONS):
         # Wall-clock timeout
@@ -1170,12 +1354,20 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
         else:
             msgs = state["messages"]
 
-        # Stream executor response
+        # Stream executor response — tokens land directly inside the box frame
         _blank()
         _dim_line()
         bar.phase(f"shifu  (turn {iteration + 1})", "▸")
 
-        response = await _stream_executor_turn(msgs, silent=True)
+        # Build the box header now so elapsed time is captured at turn start
+        _iw   = _tw() - 6
+        _ts   = datetime.now().strftime("%H:%M:%S")
+        _tag  = f" shifu  {_ts} "
+        _bdr  = "─" * max(0, _iw - len(_tag) + 2)
+        _hdr  = "  " + C.A + "┌" + C.AB + _tag + C.A + _bdr + "┐" + C.R
+
+        response = await _stream_executor_turn(msgs, silent=False, box_header=_hdr)
+        _streamed_content = True
 
         if not state["messages"]:
             all_msgs = msgs + [response]
@@ -1200,34 +1392,53 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
                 break
             continue
 
-        # Tool calls
-        for tc in response.tool_calls:
-            name = tc.get("name", "?")
-            args = tc.get("args", {})
-            primary = str(next(iter(args.values()), "")).replace("\n", " ")
-            bar.tool_call(name, primary)
-
-        tool_msgs  = []
-        tool_map   = {t.name: t for t in TOOLS}
-        for tc in response.tool_calls:
+        # Tool calls — group-aware parallel execution
+        # The executor annotates independent tool calls with the same "group"
+        # integer. Same group → asyncio.gather (parallel). Different groups →
+        # sequential. If no group is annotated, each call gets its own group
+        # (safe default = fully sequential).
+        async def _run_one_tool(tc: dict) -> ToolMessage:
             name = tc.get("name", "")
-            args = tc.get("args", {})
+            args = dict(tc.get("args", {}))
+            args.pop("group", None)  # strip internal routing key before invoking
             tid  = tc.get("id") or str(uuid.uuid4())
             tool = tool_map.get(name)
             if tool is None:
                 result = f'{{"status": "error", "message": "tool \'{name}\' not found"}}'
             else:
                 try:
-                    result = tool.invoke(args)
+                    result = await asyncio.to_thread(tool.invoke, args)
                 except Exception as e:
                     result = f'{{"status": "error", "message": "{e}"}}'
-            tool_msgs.append(ToolMessage(content=str(result), tool_call_id=tid, name=name))
+            return ToolMessage(content=str(result), tool_call_id=tid, name=name)
+
+        # Bucket calls by group; unset group gets a unique key so it runs alone
+        _auto_group = 1000
+        groups: dict[int, list] = {}
+        for tc in response.tool_calls:
+            g = tc.get("args", {}).get("group", None)
+            if g is None:
+                g = _auto_group
+                _auto_group += 1
+            groups.setdefault(int(g), []).append(tc)
+
+        tool_msgs  = []
+        tool_map   = {t.name: t for t in TOOLS}
+        for group_id in sorted(groups):
+            batch = groups[group_id]
+            # announce all tools in this batch before running
+            for tc in batch:
+                name    = tc.get("name", "?")
+                args    = tc.get("args", {})
+                primary = str(next((v for k, v in args.items() if k != "group"), "")).replace("\n", " ")
+                bar.tool_call(name, primary)
+            # run batch in parallel
+            results = await asyncio.gather(*[_run_one_tool(tc) for tc in batch])
+            tool_msgs.extend(results)
+            for tm in results:
+                bar.tool_result(tm.name, str(tm.content))
 
         state = {**state, "messages": all_msgs + tool_msgs}
-
-        for tm in tool_msgs:
-            if isinstance(tm, ToolMessage):
-                bar.tool_result(getattr(tm, "name", "tool"), str(tm.content))
 
         # If the done sentinel was present and tools finished, we're done
         if response_has_done:
@@ -1261,9 +1472,15 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
             await _offer_skill_save(mission, state["plan"])
 
     # ── hot memory: atomise prompt + response, store pair ───────────────────
-    # Done AFTER skill offer so it doesn't block the user prompt.
-    # Two LLM calls (prompt atom, response atom) run in the background.
-    if _HOT_MEM and _hot_memory is not None and final_text:
+    # Skip for COMPANION route and trivial queries — no LLM spend on chit-chat.
+    _should_atomise = (
+        _HOT_MEM
+        and _hot_memory is not None
+        and final_text
+        and state["route"] != "COMPANION"
+        and len(mission.split()) > 4
+    )
+    if _should_atomise:
         try:
             p_atoms = await asyncio.to_thread(_hot_atomise, mission, "prompt")
             r_atoms = await asyncio.to_thread(_hot_atomise, final_text, "response")
@@ -1272,6 +1489,7 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
         except Exception:
             pass  # hot memory storage is always best-effort
 
+    _drain_task.cancel()
     return final_text
 
 
@@ -1538,6 +1756,8 @@ async def shutdown():
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _main_async():
+    global _ask_user_queue
+    _ask_user_queue = asyncio.Queue()
     boot()
     _w("  " + C.OK + "✓  ready" + C.R +
        "  " + C.G  + f"playground → {PLAYGROUND_DIR.resolve()}" + C.R + "\n")
@@ -1620,7 +1840,7 @@ async def _main_async():
             _blank(); continue
 
         _history.append({"t": datetime.now().strftime("%H:%M:%S"), "q": raw})
-        render_response(answer, elapsed)
+        _blank()
 
 
 def main():
