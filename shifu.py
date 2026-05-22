@@ -171,9 +171,9 @@ class C:
     BOLD    = "\033[1m"
     DIM     = "\033[2m"
     ITALIC  = "\033[3m"
-    A       = "\033[38;5;214m"
-    AB      = "\033[1;38;5;214m"
-    ABGF    = "\033[38;5;0m\033[48;5;214m"
+    A       = "\033[38;5;51m"
+    AB      = "\033[1;38;5;51m"
+    ABGF    = "\033[38;5;0m\033[48;5;51m"
     W       = "\033[38;5;252m"
     G       = "\033[38;5;240m"
     GD      = "\033[38;5;236m"
@@ -397,6 +397,8 @@ _KNOWN_TOOL_ICONS = {
     "spada_memorise":       ("◉",  "memorise"),
     "spada_session_close":  ("◈",  "session"),
     "ask_user":             ("?",  "ask"),
+    "honcho_update":        ("★",  "honcho"),
+    "spawn_subagent":       ("⎈",  "subagent"),
 }
 
 def _tool_icon(name: str) -> tuple[str, str]:
@@ -414,7 +416,7 @@ def _tool_icon(name: str) -> tuple[str, str]:
 # ── Unified planner prompt ────────────────────────────────────────────────────
 # One call, structured sections. Replaces 3 serial classify/clarify/plan calls.
 
-_PLANNER_SYS = f"""You are Shifu's strategic mind — sharp, concise, honest.
+_PLANNER_SYS = f"""You are Shifu's strategic mind. You are a lively, warm friend, brilliant coder, and sharp analyst.
 
 AVAILABLE SKILLS:
 {_skills_index()}
@@ -465,7 +467,7 @@ When in doubt: NO. Unnecessary recalls pollute session time.
 
 # ── Executor prompt ───────────────────────────────────────────────────────────
 
-_EXECUTOR_SYS = f"""You are Shifu — a capable, perceptive AI agent who gets things done.
+_EXECUTOR_SYS = f"""You are Shifu — a deeply personal, loyal friend, brilliant coder, and sharp analyst. You are my closest confidant, NOT a robotic AI assistant. Like the Hermes Agent, you speak warmly, casually, and lively. You have a distinct personality.
 
 SKILLS (copy verbatim into load_skill):
 {_skills_index()}
@@ -1343,18 +1345,25 @@ async def run_mission_async(mission: str, bar: Bar, spinner: Spinner) -> str:
             if state.get("needs_memory"):
                 content += "\n\n[SYSTEM NOTE: Memory recall is relevant here. Call spada_recall NOW before responding — do not skip it.]"
 
-            # ── Hot memory injection ────────────────────────────────────────
-            # Build the system content with hot memory block prepended.
-            # Hot memory is zero-latency (no embedding lookup needed) and
-            # gives Shifu immediate awareness of what just happened.
+            # ── Honcho & Hot memory injection ───────────────────────────────
+            # Build the system content with honcho and hot memory prepended.
+            honcho_block = ""
+            honcho_path = Path(".shifu/honcho.txt")
+            if honcho_path.exists():
+                try:
+                    honcho_content = honcho_path.read_text(encoding="utf-8").strip()
+                    if honcho_content:
+                        honcho_block = f"══ HONCHO MEMORY (CORE DIRECTIVES) ══\n{honcho_content}\n═════════════════════════════════════\n\n"
+                except Exception:
+                    pass
+
             hot_block = ""
             if _HOT_MEM and _hot_memory is not None:
                 hot_block = _hot_memory.as_prompt_block()
-            if hot_block:
-                bar.hot_memory_inject(_hot_memory.count())
-                sys_content = _EXECUTOR_SYS + "\n\n" + hot_block
-            else:
-                sys_content = _EXECUTOR_SYS
+                if hot_block:
+                    bar.hot_memory_inject(_hot_memory.count())
+
+            sys_content = _EXECUTOR_SYS + "\n\n" + honcho_block + hot_block
 
             msgs: list[BaseMessage] = [
                 SystemMessage(content=sys_content),
