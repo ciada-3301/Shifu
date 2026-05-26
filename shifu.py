@@ -106,7 +106,7 @@ PLAYGROUND_DIR = Path("Playground"); PLAYGROUND_DIR.mkdir(exist_ok=True)
 SKILLS_DIR     = Path("skills");     SKILLS_DIR.mkdir(exist_ok=True)
 DATA_DIR       = Path(".shifu");     DATA_DIR.mkdir(exist_ok=True)
 
-MODEL_NAME      = "gpt-oss:120b-cloud"
+MODEL_NAME      = "nemotron-3-super:cloud"
 BASE_URL        = "https://ollama.com/v1"
 MAX_RPM         = 20
 MAX_ITERATIONS  = 50
