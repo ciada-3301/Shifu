@@ -111,7 +111,7 @@ BASE_URL        = "https://ollama.com/v1"
 MAX_RPM         = 20
 MAX_ITERATIONS  = 50
 MAX_RETRIES     = 10
-MISSION_TIMEOUT        = 300  # seconds (5 minutes hard wall)
+MISSION_TIMEOUT        = 1500  # seconds (5 minutes hard wall)
 SESSION_CONTEXT_MAX    = 8    # max missions kept in rolling context
 
 
